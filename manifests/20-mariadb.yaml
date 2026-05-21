@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mariadb
+  namespace: moodle-prod
+  labels:
+    app: mariadb
+    tier: database
+spec:
+  serviceName: mariadb
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mariadb
+  template:
+    metadata:
+      labels:
+        app: mariadb
+        tier: database
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: k3s-moodle-master
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: mariadb
+        image: mariadb:lts
+        ports:
+        - containerPort: 3306
+          name: mysql
+        envFrom:
+        - configMapRef:
+            name: mariadb-config
+        - secretRef:
+            name: mariadb-secrets
+        env:
+        - name: MARIADB_HOST
+          value: "localhost"
+        # IMPORTANTE: usar 'args' en lugar de 'command'
+        # 'command' sobreescribe docker-entrypoint.sh completo → MariaDB nunca
+        # ejecuta mysql_install_db y el directorio vacío nunca se inicializa.
+        # 'args' pasa los flags directamente al entrypoint que sí inicializa primero.
+        args:
+        - --character-set-server=utf8mb4
+        - --collation-server=utf8mb4_unicode_ci
+        - --init-connect=SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci
+        - --skip-character-set-client-handshake
+        - --innodb_file_per_table=1
+        - --innodb_buffer_pool_size=1G
+        - --innodb_log_file_size=256M
+        - --max_connections=200
+        volumeMounts:
+        - name: mariadb-data
+          mountPath: /var/lib/mysql
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - "mariadb-admin ping -h localhost -u root -p${MARIADB_ROOT_PASSWORD}"
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - "mariadb-admin ping -h localhost -u root -p${MARIADB_ROOT_PASSWORD}"
+          initialDelaySeconds: 15
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      # Usar volumes + claimName para PVC estático con nombre fijo
+      # (más predecible que volumeClaimTemplates en single-node)
+      volumes:
+      - name: mariadb-data
+        persistentVolumeClaim:
+          claimName: mariadb-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mariadb
+  namespace: moodle-prod
+  labels:
+    app: mariadb
+spec:
+  type: ClusterIP
+  ports:
+  - port: 3306
+    targetPort: 3306
+    protocol: TCP
+    name: mysql
+  selector:
+    app: mariadb

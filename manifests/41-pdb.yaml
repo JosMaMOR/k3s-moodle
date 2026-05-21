@@ -1,0 +1,21 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: moodle-pdb
+  namespace: moodle-prod
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: moodle
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mariadb-pdb
+  namespace: moodle-prod
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: mariadb

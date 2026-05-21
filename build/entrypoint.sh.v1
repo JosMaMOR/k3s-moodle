@@ -1,0 +1,453 @@
+#!/bin/bash
+# ============================================================
+# entrypoint.sh — Moodle 5.1.1 K3s TESOEM
+#
+# FLUJO:
+#   1. Verificar PHP
+#   2. Variables de entorno
+#   3. Esperar servicios (MariaDB, Redis)
+#   4. Sincronizar código al PVC (primer arranque)
+#   5a. INSTALACIÓN NUEVA → instalar CLI → generar config.php completo
+#   5b. INSTALACIÓN EXISTENTE → verificar config.php sin modificarlo
+#       salvo en casos explícitos (dominio cambió, faltan claves)
+#   6. Permisos moodledata
+#   7. Cron interno (opcional)
+#   8. Validación final
+#   9. Arrancar Apache
+#
+# REGLA config.php:
+#   El config.php SOLO se genera/modifica en estos casos:
+#     a) Primera instalación — se genera desde cero con todo incluido
+#     b) Migración de raíz a public/ — instalaciones pre-5.1
+#     c) wwwroot cambió — actualización de dominio
+#   En arranques normales NO se toca config.php para evitar
+#   introducir duplicados o sobreescribir configuración manual.
+# ============================================================
+set -e
+
+echo "========================================"
+echo " Iniciando Moodle Container"
+echo " Image Version: ${IMAGE_VERSION:-5.1}"
+echo " Moodle Version: ${MOODLE_VERSION:-5.1.1}"
+echo " K3S_MODE: ${K3S_MODE:-false}"
+echo " Modo HTTPS: Traefik termina TLS → HTTP:8080"
+echo "========================================"
+echo ""
+
+# ============================================================
+# 1. VERIFICAR PHP
+# ============================================================
+echo "[Entrypoint] Verificando requisitos PHP..."
+PHP_VARS=$(php -r "echo ini_get('max_input_vars');")
+echo "[Entrypoint] max_input_vars actual: $PHP_VARS"
+if [ "$PHP_VARS" -lt 5000 ]; then
+    echo "[Entrypoint] ERROR: max_input_vars es $PHP_VARS, requiere >= 5000"
+    php --ini | grep -E "(Loaded|\.ini)"
+    exit 1
+fi
+echo "[Entrypoint] ✓ PHP configurado correctamente"
+echo ""
+
+# ============================================================
+# 2. VARIABLES DE ENTORNO CON DEFAULTS
+# ============================================================
+: "${MARIADB_HOST:=mariadb}"
+: "${MARIADB_PORT:=3306}"
+: "${MARIADB_DATABASE:=moodle}"
+: "${MARIADB_USER:=moodle}"
+: "${MARIADB_PASSWORD:?Variable MARIADB_PASSWORD no definida}"
+: "${MARIADB_CHARACTER_SET:=utf8mb4}"
+: "${MARIADB_COLLATE:=utf8mb4_unicode_ci}"
+
+# Aliases DB para el instalador de Moodle
+: "${MOODLE_DB_HOST:=${MARIADB_HOST}}"
+: "${MOODLE_DB_PORT:=${MARIADB_PORT}}"
+: "${MOODLE_DB_NAME:=${MARIADB_DATABASE}}"
+: "${MOODLE_DB_USER:=${MARIADB_USER}}"
+: "${MOODLE_DB_PASS:=${MARIADB_PASSWORD}}"
+
+: "${REDIS_HOST:=redis}"
+: "${REDIS_PORT:=6379}"
+: "${REDIS_PASSWORD:=}"
+
+: "${SERVER_NAME:=mcc.tesoem.edu.mx}"
+: "${MOODLE_URL:=https://${SERVER_NAME}}"
+: "${MOODLE_LANG:=es_mx}"
+: "${MOODLE_CHMOD:=2777}"
+
+: "${DB_TYPE:=mariadb}"
+: "${DB_HOST:=${MOODLE_DB_HOST}}"
+: "${DB_PORT:=${MOODLE_DB_PORT}}"
+: "${DB_NAME:=${MOODLE_DB_NAME}}"
+: "${DB_USER:=${MOODLE_DB_USER}}"
+: "${DB_PASS:=${MOODLE_DB_PASS}}"
+
+: "${MOODLE_FULLNAME:=Plataforma Educativa TESOEM}"
+: "${MOODLE_SHORTNAME:=TESOEM-Moodle}"
+: "${MOODLE_ADMIN_USER:=admin}"
+: "${MOODLE_ADMIN_PASS:?Variable MOODLE_ADMIN_PASS no definida}"
+: "${MOODLE_ADMIN_EMAIL:=admin@tesoem.edu.mx}"
+
+: "${ENABLE_CRON:=false}"
+: "${K3S_MODE:=false}"
+
+# ============================================================
+# 3. ESPERAR SERVICIOS
+# ============================================================
+echo "Esperando MariaDB en ${MARIADB_HOST}:${MARIADB_PORT}..."
+until timeout 2 bash -c "</dev/tcp/${MARIADB_HOST}/${MARIADB_PORT}" 2>/dev/null; do
+    echo "  MariaDB no disponible aún, esperando 5s..."
+    sleep 5
+done
+echo "✓ MariaDB disponible."
+
+echo "Esperando Redis en ${REDIS_HOST}:${REDIS_PORT}..."
+until timeout 2 bash -c "</dev/tcp/${REDIS_HOST}/${REDIS_PORT}" 2>/dev/null; do
+    echo "  Redis no disponible aún, esperando 3s..."
+    sleep 3
+done
+echo "✓ Redis disponible."
+
+# ============================================================
+# 4. SINCRONIZAR CÓDIGO MOODLE AL PVC EN PRIMER ARRANQUE
+#
+# Moodle 5.1 estructura en la imagen:
+#   /var/www/html-source/
+#     ├── admin/cli/install.php    ← CLI fuera de public/
+#     ├── public/                  ← DocumentRoot web
+#     │   ├── login/index.php
+#     │   ├── lib/
+#     │   └── ...
+#     └── ...
+#
+# El PVC llega vacío en el primer arranque. Sin esta copia
+# el instalador falla con "Could not open input file".
+# ============================================================
+echo "[Entrypoint] Verificando código Moodle en volumen..."
+if [ ! -f /var/www/html/admin/cli/install.php ] && \
+   [ ! -f /var/www/html/public/login/index.php ]; then
+    echo "[Entrypoint] Volumen /var/www/html vacío — copiando código desde imagen..."
+    echo "[Entrypoint] Origen:  /var/www/html-source"
+    echo "[Entrypoint] Destino: /var/www/html"
+
+    if [ ! -d /var/www/html-source ] || \
+       [ ! -f /var/www/html-source/public/login/index.php ]; then
+        echo "[Entrypoint] ✗ ERROR: /var/www/html-source no contiene código Moodle"
+        echo "[Entrypoint] Reconstruye la imagen con: ./05-build-image.sh"
+        exit 1
+    fi
+
+    COPY_START=$(date +%s)
+    cp -a /var/www/html-source/. /var/www/html/
+    COPY_END=$(date +%s)
+
+    echo "[Entrypoint] ✓ Código Moodle copiado en $((COPY_END - COPY_START))s"
+    echo "[Entrypoint] Archivos copiados: $(find /var/www/html -type f | wc -l)"
+else
+    echo "[Entrypoint] ✓ Código Moodle ya presente en volumen — omitiendo copia"
+    echo "[Entrypoint] Versión: $(grep 'release' /var/www/html/public/version.php \
+                                   2>/dev/null | head -1 || echo 'desconocida')"
+fi
+echo ""
+
+# ============================================================
+# 5. INSTALACIÓN O VERIFICACIÓN
+# ============================================================
+
+# Detectar ubicación del config.php
+# Moodle 5.1 lo coloca en public/config.php
+# Versiones anteriores en la raíz /var/www/html/config.php
+CONFIG_FILE=""
+if [ -f /var/www/html/public/config.php ]; then
+    CONFIG_FILE="/var/www/html/public/config.php"
+elif [ -f /var/www/html/config.php ] && [ ! -L /var/www/html/config.php ]; then
+    CONFIG_FILE="/var/www/html/config.php"
+fi
+
+if [ -n "${CONFIG_FILE}" ]; then
+    # ----------------------------------------------------------
+    # 5b. INSTALACIÓN EXISTENTE
+    # ----------------------------------------------------------
+    echo "[Entrypoint] ✓ config.php encontrado en: ${CONFIG_FILE}"
+    echo "[Entrypoint] Modo: instalación existente"
+
+    # ── Migración pre-5.1 → 5.1 ───────────────────────────────
+    # Si config.php está solo en la raíz (instalación pre-5.1),
+    # copiarlo a public/ que es donde Moodle 5.1 lo espera.
+    # login/index.php hace require('../config.php') subiendo
+    # desde public/login/ → busca public/config.php
+    if [ "${CONFIG_FILE}" = "/var/www/html/config.php" ] && \
+       [ ! -f /var/www/html/public/config.php ]; then
+        echo "[Entrypoint] Migrando config.php raíz → public/ (Moodle 5.1)..."
+        cp /var/www/html/config.php /var/www/html/public/config.php
+        chmod 640 /var/www/html/public/config.php
+        ln -sf /var/www/html/public/config.php /var/www/html/config.php 2>/dev/null || true
+        CONFIG_FILE="/var/www/html/public/config.php"
+        echo "[Entrypoint] ✓ config.php migrado a public/"
+    fi
+
+    # ── Crear symlink raíz → public si no existe ──────────────
+    # admin/cli/cron.php y install.php necesitan encontrar
+    # config.php subiendo 2 niveles desde admin/cli/ → raíz
+    if [ ! -e /var/www/html/config.php ]; then
+        ln -sf /var/www/html/public/config.php /var/www/html/config.php
+        echo "[Entrypoint] ✓ Symlink raíz → public/config.php creado"
+    fi
+
+    # ── Verificar cambio de dominio ────────────────────────────
+    # ÚNICO caso en que se modifica config.php en arranque normal:
+    # si el wwwroot en BD difiere de MOODLE_URL, avisar al operador.
+    # No se modifica automáticamente para evitar romper sesiones.
+    CURRENT_URL=$(grep -oP "(?<=wwwroot\s*=\s*')[^']+" "${CONFIG_FILE}" 2>/dev/null \
+                  || grep -oP '(?<=wwwroot\s*=\s*")[^"]+' "${CONFIG_FILE}" 2>/dev/null \
+                  || echo "")
+    if [ -n "${CURRENT_URL}" ] && [ "${CURRENT_URL}" != "${MOODLE_URL}" ]; then
+        echo "[Entrypoint] ⚠ AVISO: wwwroot en config.php difiere de MOODLE_URL"
+        echo "  Actual:   ${CURRENT_URL}"
+        echo "  Esperado: ${MOODLE_URL}"
+        echo "  Para actualizar el dominio ejecuta desde dentro del pod:"
+        echo "    php /var/www/html/admin/cli/cfg.php --name=wwwroot --set=${MOODLE_URL}"
+        echo "    php /var/www/html/admin/cli/replace.php --search=${CURRENT_URL} --replace=${MOODLE_URL}"
+    fi
+
+else
+    # ----------------------------------------------------------
+    # 5a. PRIMERA INSTALACIÓN
+    # ----------------------------------------------------------
+    echo "[Entrypoint] config.php NO encontrado — instalando Moodle..."
+    echo "  URL:    ${MOODLE_URL}"
+    echo "  DB:     ${DB_HOST}:${DB_PORT}/${DB_NAME}"
+    echo "  Admin:  ${MOODLE_ADMIN_USER}"
+
+    mkdir -p /var/www/moodledata
+    chown moodle:www-data /var/www/moodledata 2>/dev/null || true
+    chmod 2777 /var/www/moodledata
+
+    # ── Ejecutar instalador CLI ────────────────────────────────
+    # install.php genera config.php en /var/www/html/config.php
+    # con los parámetros básicos: db, wwwroot, dataroot, admin.
+    # Después añadimos la configuración K3s específica.
+    php /var/www/html/admin/cli/install.php \
+        --non-interactive \
+        --chmod="${MOODLE_CHMOD}" \
+        --lang="${MOODLE_LANG}" \
+        --wwwroot="${MOODLE_URL}" \
+        --dataroot="/var/www/moodledata" \
+        --dbtype="${DB_TYPE}" \
+        --dbhost="${DB_HOST}" \
+        --dbport="${DB_PORT}" \
+        --dbname="${DB_NAME}" \
+        --dbuser="${DB_USER}" \
+        --dbpass="${DB_PASS}" \
+        --prefix="mdl_" \
+        --fullname="${MOODLE_FULLNAME}" \
+        --shortname="${MOODLE_SHORTNAME}" \
+        --adminuser="${MOODLE_ADMIN_USER}" \
+        --adminpass="${MOODLE_ADMIN_PASS}" \
+        --adminemail="${MOODLE_ADMIN_EMAIL}" \
+        --supportemail="${MOODLE_ADMIN_EMAIL}" \
+        --agree-license
+
+    if [ $? -ne 0 ]; then
+        echo "[Entrypoint] ✗ Error en la instalación de Moodle"
+        exit 1
+    fi
+    echo "[Entrypoint] ✓ Instalación CLI completada"
+
+    # ── Habilitar cron en BD ───────────────────────────────────
+    # El instalador deja cron_enabled=0 por defecto.
+    # Sin esto el CronJob K8s falla con "Cron is disabled".
+    echo "[Entrypoint] Habilitando cron en BD..."
+    php /var/www/html/admin/cli/cfg.php --name=cron_enabled --set=1 2>/dev/null \
+        && echo "[Entrypoint] ✓ Cron habilitado" \
+        || echo "[Entrypoint] ⚠ No se pudo habilitar cron automáticamente"
+
+    # ── Completar config.php con configuración K3s ─────────────
+    # install.php genera un config.php mínimo. Aquí añadimos:
+    #   - dirroot: ruta al código web (Moodle 5.1 usa public/)
+    #   - reverseproxy/sslproxy: para Traefik
+    #   - Redis: sesiones y caché
+    #   - Ajustes de rendimiento
+    #
+    # IMPORTANTE: se usa un archivo temporal para reemplazar el
+    # config.php generado en lugar de append, para evitar el
+    # problema de doble require_once(setup.php) que genera el
+    # instalador al final de su config.php base.
+    echo "[Entrypoint] Completando config.php con configuración K3s..."
+
+    # El instalador genera config.php terminado con require_once.
+    # Extraemos todo hasta (sin incluir) esa línea final.
+    CONFIG_BASE=$(grep -v "require_once.*setup.php" /var/www/html/config.php \
+                  | grep -v "^// There is no php closing" \
+                  | grep -v "^// it is intentional")
+
+    # Construir config.php completo con un solo require_once al final
+    cat > /var/www/html/config.php << CFGEOF
+${CONFIG_BASE}
+
+// ── Moodle 5.1: dirroot apunta a public/ ────────────────────────────────────
+// Sin dirroot, theme/image.php, theme/font.php y lib/javascript.php
+// no pueden resolver rutas a archivos del tema (500 en recursos dinámicos).
+// En Moodle 5.1 el DocumentRoot de Apache es public/, por lo que
+// dirroot debe apuntar a esa misma ubicación.
+\$CFG->dirroot = '/var/www/html/public';
+
+// ── K3s / Traefik: proxy inverso termina TLS ─────────────────────────────────
+// reverseproxy: Moodle usa X-Forwarded-For para IP real del cliente
+// sslproxy: Moodle trata X-Forwarded-Proto: https como conexión segura
+//           → genera URLs https://, cookies Secure, sin loops de redirect
+\$CFG->reverseproxy = false;
+\$CFG->sslproxy     = true;
+
+// ── Idioma y caché ───────────────────────────────────────────────────────────
+\$CFG->lang      = 'es_mx';
+\$CFG->langcache = true;
+
+// ── Sesiones en Redis (DB 0) ─────────────────────────────────────────────────
+\$CFG->session_handler_class             = '\\\\core\\\\session\\\\redis';
+\$CFG->session_redis_host                = '${REDIS_HOST}';
+\$CFG->session_redis_port                = ${REDIS_PORT};
+\$CFG->session_redis_prefix              = 'moodle_sess_';
+\$CFG->session_redis_acquire_lock_timeout = 120;
+\$CFG->session_redis_lock_expire         = 7200;
+\$CFG->session_redis_database            = 0;
+CFGEOF
+
+    # Contraseña Redis (puede estar vacía)
+    if [ -n "${REDIS_PASSWORD}" ]; then
+        echo "\$CFG->session_redis_auth = '${REDIS_PASSWORD}';" >> /var/www/html/config.php
+    else
+        echo "\$CFG->session_redis_auth = null;" >> /var/www/html/config.php
+    fi
+
+    cat >> /var/www/html/config.php << CFGEOF2
+
+// ── Caché en Redis (DB 1) ────────────────────────────────────────────────────
+\$CFG->cachestore_redis_server   = '${REDIS_HOST}';
+\$CFG->cachestore_redis_port     = ${REDIS_PORT};
+\$CFG->cachestore_redis_database = 1;
+\$CFG->cachestore_redis_prefix   = 'moodle_cache_';
+CFGEOF2
+
+    if [ -n "${REDIS_PASSWORD}" ]; then
+        echo "\$CFG->cachestore_redis_password = '${REDIS_PASSWORD}';" >> /var/www/html/config.php
+    else
+        echo "\$CFG->cachestore_redis_password = null;" >> /var/www/html/config.php
+    fi
+
+    cat >> /var/www/html/config.php << CFGEOF3
+
+// ── Rendimiento ──────────────────────────────────────────────────────────────
+@ini_set('memory_limit', '512M');
+
+// ── Bootstrap — debe ser la ÚLTIMA línea ejecutable ─────────────────────────
+require_once(__DIR__ . '/lib/setup.php');
+CFGEOF3
+
+    echo "[Entrypoint] ✓ config.php completado con configuración K3s"
+
+    # ── Mover config.php a public/ y crear symlink ─────────────
+    # login/index.php hace require('../config.php') desde public/login/
+    # → necesita config.php en public/config.php
+    # admin/cli/cron.php hace require('../../config.php') desde admin/cli/
+    # → necesita config.php en la raíz (via symlink)
+    echo "[Entrypoint] Ubicando config.php en public/ (Moodle 5.1)..."
+    cp /var/www/html/config.php /var/www/html/public/config.php
+    chmod 640 /var/www/html/public/config.php
+    # Symlink raíz → public para compatibilidad con CLI
+    ln -sf /var/www/html/public/config.php /var/www/html/config.php 2>/dev/null || true
+    echo "[Entrypoint] ✓ config.php en public/ + symlink raíz creado"
+    CONFIG_FILE="/var/www/html/public/config.php"
+fi
+
+# ============================================================
+# 6. PERMISOS Y DIRECTORIOS DE MOODLEDATA
+# ============================================================
+if [ -d /var/www/moodledata ]; then
+    if [ -w /var/www/moodledata ]; then
+        echo "✓ moodledata escribible"
+    else
+        echo "⚠ moodledata no escribible — revisa permisos del PVC"
+    fi
+    mkdir -p /var/www/moodledata/{sessions,cache,localcache,temp,filedir}
+fi
+
+if [ -f /var/www/html/public/config.php ]; then
+    chmod 640 /var/www/html/public/config.php 2>/dev/null || true
+    echo "✓ Permisos config.php ajustados"
+fi
+
+# ============================================================
+# 7. CRON INTERNO (deshabilitado por defecto — usar CronJob K8s)
+# ============================================================
+if [ "${ENABLE_CRON}" = "true" ]; then
+    echo "=> Iniciando cron interno..."
+    (
+        while true; do
+            START_TIME=$(date +%s)
+            echo "[Cron] $(date '+%Y-%m-%d %H:%M:%S') — ejecutando..."
+            /usr/bin/php /var/www/html/admin/cli/cron.php > /dev/null 2>&1 || true
+            END_TIME=$(date +%s)
+            echo "[Cron] Completado en $((END_TIME - START_TIME))s"
+            sleep 60
+        done
+    ) &
+    echo "=> Cron activo (PID: $!)"
+else
+    echo "=> Cron deshabilitado (CronJob K8s activo)"
+fi
+
+# ============================================================
+# 8. VALIDACIÓN FINAL
+# ============================================================
+echo ""
+echo "[Entrypoint] Validación final..."
+
+if [ ! -f /var/www/html/public/config.php ] && \
+   [ ! -f /var/www/html/config.php ]; then
+    echo "[Entrypoint] ✗ ERROR: Sin config.php"
+    exit 1
+fi
+echo "[Entrypoint] ✓ config.php presente"
+
+if timeout 5 bash -c "</dev/tcp/${MARIADB_HOST}/${MARIADB_PORT}" 2>/dev/null; then
+    echo "[Entrypoint] ✓ MariaDB accesible"
+else
+    echo "[Entrypoint] ✗ MariaDB no accesible en ${MARIADB_HOST}:${MARIADB_PORT}"
+    exit 1
+fi
+
+if timeout 5 bash -c "</dev/tcp/${REDIS_HOST}/${REDIS_PORT}" 2>/dev/null; then
+    echo "[Entrypoint] ✓ Redis accesible"
+else
+    echo "[Entrypoint] ✗ Redis no accesible en ${REDIS_HOST}:${REDIS_PORT}"
+    exit 1
+fi
+
+echo "[Entrypoint] ✓ Validación completada"
+
+# ============================================================
+# 9. INICIAR APACHE
+# ============================================================
+echo ""
+echo "========================================"
+echo " Iniciando Apache"
+echo " URL pública:  ${MOODLE_URL}"
+echo " Puerto Apache: 8080 HTTP"
+echo " TLS gestionado por: Traefik Ingress"
+echo "========================================"
+
+export APACHE_RUN_USER=moodle
+export APACHE_RUN_GROUP=www-data
+export APACHE_RUN_DIR=/tmp/apache2/run
+export APACHE_PID_FILE=/tmp/apache2/run/apache2.pid
+export APACHE_LOCK_DIR=/tmp/apache2/lock
+export APACHE_LOG_DIR=/tmp/apache2/logs
+
+mkdir -p /tmp/apache2/run /tmp/apache2/lock /tmp/apache2/logs
+chmod 777 /tmp/apache2/run /tmp/apache2/lock /tmp/apache2/logs
+
+rm -rf /var/run/apache2 2>/dev/null || true
+ln -sfn /tmp/apache2/run /var/run/apache2 2>/dev/null || true
+
+exec /usr/sbin/apache2 -DFOREGROUND

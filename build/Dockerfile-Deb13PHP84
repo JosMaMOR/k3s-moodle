@@ -1,0 +1,312 @@
+# ============================================================
+# STAGE 1: Builder - Descarga y preparación de Moodle
+# ============================================================
+FROM debian:trixie-slim AS builder
+
+ARG MOODLE_VERSION=5.1.1
+
+WORKDIR /moodle-build
+
+# Instalar herramientas de build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+        ca-certificates \
+        unzip \
+        git \
+        php8.4 \
+        php8.4-mysql \
+        php8.4-xml \
+        php8.4-xmlrpc \
+        php8.4-intl \
+        php8.4-curl \
+        php8.4-zip \
+        php8.4-mbstring \
+        php8.4-gd \
+        php8.4-soap \
+        php8.4-opcache \
+        php8.4-readline \
+        php8.4-cli \
+        php8.4-ldap \
+        php8.4-gmp \
+        php8.4-bz2 \
+        php8.4-pspell \
+        php8.4-snmp \
+        php8.4-xsl \
+        php8.4-odbc \
+        php-redis \
+        redis-tools \
+        curl \
+        ca-certificates \
+        ghostscript \
+        openssl \
+        netcat-traditional \
+    && rm -rf /var/lib/apt/lists/*
+
+# Instalar Composer
+RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+
+# Copiar código de Moodle desde contexto local
+COPY moodle /moodle-build/
+
+# Instalar dependencias de Composer (optimizado para producción)
+RUN composer install \
+        --no-dev \
+        --no-interaction \
+        --optimize-autoloader \
+        --classmap-authoritative \
+        --apcu-autoloader \
+    && rm -rf /root/.composer/cache \
+    && composer clear-cache
+
+# ============================================================
+# STAGE 2: Runtime - Imagen final para K3s
+# ============================================================
+FROM debian:trixie-slim
+
+LABEL org.opencontainers.image.title="Moodle Apache PHP K3s RAID" \
+      org.opencontainers.image.description="Moodle 5.1.1 para K3s HA con RAID local" \
+      org.opencontainers.image.version="5.1.1-k3s-raid" \
+      org.opencontainers.image.authors="MSCD. Gustavo Romero" \
+      org.opencontainers.image.vendor="TESOEM"
+
+ARG MOODLE_VERSION=5.1.1
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8 \
+    APACHE_RUN_USER=moodle \
+    APACHE_RUN_GROUP=www-data \
+    APACHE_PID_FILE=/tmp/apache2.pid \
+    APACHE_LOG_DIR=/var/log/apache2 \
+    APACHE_RUN_DIR=/var/run/apache2 \
+    K3S_MODE=false \
+    TERM=xterm
+
+# ============================================================
+# Instalación de dependencias
+# ============================================================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    locales \
+    apache2 \
+    libapache2-mod-php8.4 \
+    php8.4 \
+    php8.4-mysql \
+    php8.4-xml \
+    php8.4-xmlrpc \
+    php8.4-intl \
+    php8.4-curl \
+    php8.4-zip \
+    php8.4-mbstring \
+    php8.4-gd \
+    php8.4-soap \
+    php8.4-opcache \
+    php8.4-readline \
+    php8.4-cli \
+    php8.4-ldap \
+    php8.4-gmp \
+    php8.4-bz2 \
+    php8.4-pspell \
+    php8.4-snmp \
+    php8.4-xsl \
+    php8.4-odbc \
+    php-redis \
+    redis-tools \
+    curl \
+    ca-certificates \
+    ghostscript \
+    openssl \
+    netcat-traditional \
+    procps \
+    && sed -i 's/# es_MX.UTF-8 UTF-8/es_MX.UTF-8 UTF-8/' /etc/locale.gen \
+    && sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen \
+    && locale-gen \
+    && update-locale LANG=en_US.UTF-8 \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# ============================================================
+# Configurar Apache para rootless
+# ============================================================
+RUN a2enmod ssl rewrite headers env mime dir setenvif \
+    && a2dissite 000-default default-ssl 2>/dev/null || true \
+    && sed -i \
+        -e 's/Listen 80$/Listen 8080/' \
+        -e '/Listen 443/d' \
+        -e '/<IfModule ssl_module>/a\    Listen 8443' \
+        /etc/apache2/ports.conf \
+    && mkdir -p /var/www/moodledata /etc/apache2/ssl /var/run/apache2 /etc/apache2/custom-conf \
+    && useradd -u 1001 -r -g www-data -d /var/www -s /usr/sbin/nologin moodle \
+    && sed -i 's/^User www-data/User moodle/' /etc/apache2/apache2.conf \
+    && sed -i 's/^Group www-data/Group www-data/' /etc/apache2/apache2.conf \
+    && sed -i 's|^PidFile .*|PidFile /tmp/apache2.pid|' /etc/apache2/apache2.conf \
+    && echo "IncludeOptional custom-conf/*.conf" >> /etc/apache2/apache2.conf
+
+# ============================================================
+# Configurar PHP
+# ============================================================
+RUN cat > /etc/php/8.4/moodle-php.ini << 'EOFPHP'
+memory_limit = 512M
+max_execution_time = 600
+max_input_time = 300
+max_input_vars = 5000
+post_max_size = 512M
+upload_max_filesize = 512M
+max_file_uploads = 20
+default_charset = "UTF-8"
+mbstring.internal_encoding = UTF-8
+mbstring.http_output = UTF-8
+mbstring.encoding_translation = On
+session.save_handler = files
+session.save_path = /var/www/moodledata/sessions
+session.gc_probability = 1
+session.gc_divisor = 1000
+session.gc_maxlifetime = 7200
+opcache.enable = 1
+opcache.enable_cli = 1
+opcache.memory_consumption = 256
+opcache.interned_strings_buffer = 32
+opcache.max_accelerated_files = 16000
+opcache.revalidate_freq = 2
+opcache.validate_timestamps = 0
+opcache.save_comments = 1
+opcache.fast_shutdown = 1
+opcache.optimization_level = 0xFFFFFFFF
+expose_php = Off
+allow_url_fopen = Off
+allow_url_include = Off
+display_errors = Off
+log_errors = On
+error_log = /var/log/apache2/php_errors.log
+date.timezone = America/Mexico_City
+EOFPHP
+
+RUN cp /etc/php/8.4/moodle-php.ini /etc/php/8.4/apache2/conf.d/99-moodle.ini \
+    && cp /etc/php/8.4/moodle-php.ini /etc/php/8.4/cli/conf.d/99-moodle.ini \
+    && rm /etc/php/8.4/moodle-php.ini
+
+# Verificar PHP
+RUN php -r "if (ini_get('max_input_vars') < 5000) { echo 'ERROR: max_input_vars < 5000\n'; exit(1); } else { echo 'OK: PHP configurado correctamente\n'; }"
+
+# ============================================================
+# Configurar directorios temporales para Apache rootless
+# ============================================================
+RUN mkdir -p /var/www/moodledata/sessions \
+    && mkdir -p /tmp/apache2/run /tmp/apache2/lock /tmp/apache2/logs \
+    && chmod -R 777 /tmp/apache2 \
+    && sed -i 's|/var/run/apache2|/tmp/apache2/run|g' /etc/apache2/apache2.conf \
+    && sed -i 's|/var/lock/apache2|/tmp/apache2/lock|g' /etc/apache2/envvars 2>/dev/null || true \
+    && echo "" >> /etc/apache2/apache2.conf \
+    && echo "# Rootless K3s configuration" >> /etc/apache2/apache2.conf \
+    && echo "PidFile /tmp/apache2/run/apache2.pid" >> /etc/apache2/apache2.conf \
+    && echo "Mutex file:/tmp/apache2/lock default" >> /etc/apache2/apache2.conf \
+    && echo "DefaultRuntimeDir /tmp/apache2/run" >> /etc/apache2/apache2.conf \
+    && rm -rf /var/log/apache2 \
+    && ln -s /tmp/apache2/logs /var/log/apache2 \
+    && touch /tmp/apache2/logs/access.log /tmp/apache2/logs/error.log /tmp/apache2/logs/php_errors.log \
+    && chmod 755 /var/log/apache2 /tmp/apache2/logs \
+    && ln -sf /dev/stdout /var/log/apache2/access.log \
+    && ln -sf /dev/stderr /var/log/apache2/error.log \
+    && ln -sf /dev/stderr /var/log/apache2/php_errors.log
+
+# ============================================================
+# Copiar Moodle desde builder
+# ============================================================
+COPY --from=builder --chown=moodle:www-data /moodle-build /var/www/html
+
+# ============================================================
+# Configurar VirtualHost SSL puerto 8443
+# ============================================================
+COPY <<'EOFVHOST' /etc/apache2/sites-available/moodle-ssl.conf
+<IfModule mod_ssl.c>
+    <VirtualHost _default_:8443>
+        ServerAdmin admin@tesoem.edu.mx
+        ServerName mcc.tesoem.edu.mx
+        ServerAlias localhost
+        
+        DocumentRoot /var/www/html
+        
+        <Directory /var/www/html>
+            Options FollowSymLinks
+            AllowOverride All
+            Require all granted
+            DirectoryIndex index.php
+        </Directory>
+        
+        SSLEngine on
+        SSLCertificateFile /etc/apache2/ssl/server.crt
+        SSLCertificateKeyFile /etc/apache2/ssl/server.key
+        
+        SSLProtocol all -SSLv3 -TLSv1 -TLSv1.1
+        SSLCipherSuite HIGH:!aNULL:!MD5:!3DES
+        SSLHonorCipherOrder on
+        SSLCompression off
+        SSLSessionTickets off
+        
+        ErrorLog /var/log/apache2/error.log
+        CustomLog /var/log/apache2/access.log combined
+        
+        Header always set X-Frame-Options "SAMEORIGIN"
+        Header always set X-Content-Type-Options "nosniff"
+        Header always set X-XSS-Protection "1; mode=block"
+        Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    </VirtualHost>
+</IfModule>
+
+<VirtualHost *:8080>
+    ServerAdmin admin@tesoem.edu.mx
+    ServerName mcc.tesoem.edu.mx
+    
+    DocumentRoot /var/www/html
+    
+    <Directory /var/www/html>
+        Options FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+    
+    ErrorLog /var/log/apache2/error.log
+    CustomLog /var/log/apache2/access.log combined
+</VirtualHost>
+EOFVHOST
+
+RUN a2ensite moodle-ssl.conf
+
+# ============================================================
+# Entrypoint
+# ============================================================
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod 755 /entrypoint.sh
+
+# ============================================================
+# Permisos finales
+# ============================================================
+RUN chown -R moodle:www-data \
+        /var/www/html \
+        /var/www/moodledata \
+        /etc/apache2/ssl \
+        /var/log/apache2 \
+        /var/run/apache2 \
+        /etc/apache2/custom-conf \
+        /tmp \
+    && chmod 2770 /var/www/moodledata \
+    && chmod 2770 /var/www/moodledata/sessions \
+    && chmod 755 /var/log/apache2 \
+    && chmod 755 /var/run/apache2 \
+    && chmod 777 /tmp
+
+# ============================================================
+# Healthcheck
+# ============================================================
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -fk https://localhost:8443/login/index.php || exit 1
+
+# ============================================================
+# Metadatos y exposición
+# ============================================================
+USER moodle
+WORKDIR /var/www/html
+
+EXPOSE 8080 8443
+
+VOLUME ["/var/www/moodledata", "/var/www/html", "/etc/apache2/custom-conf", "/etc/apache2/ssl"]
+
+ENTRYPOINT ["/entrypoint.sh"]

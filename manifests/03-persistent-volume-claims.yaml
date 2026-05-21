@@ -1,0 +1,83 @@
+# ── PVC: MariaDB ──────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mariadb-pvc
+  namespace: moodle-prod
+  labels:
+    app: mariadb
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-raid
+  resources:
+    requests:
+      storage: 20Gi
+  selector:
+    matchLabels:
+      app: mariadb
+---
+# ── PVC: Redis ────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-pvc
+  namespace: moodle-prod
+  labels:
+    app: redis
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-raid
+  resources:
+    requests:
+      storage: 2Gi
+  selector:
+    matchLabels:
+      app: redis
+---
+# ── PVC: Moodle HTML ──────────────────────────────────────────────────────────
+# FIX v3: matchLabels incluye 'volume: moodle-html' → binding determinístico
+# al PV correcto (10Gi, /moodlek3s/moodle-html), no al de 50Gi de moodle-data.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: moodle-html-pvc
+  namespace: moodle-prod
+  labels:
+    app: moodle
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: local-raid
+  resources:
+    requests:
+      storage: 10Gi
+  selector:
+    matchLabels:
+      app: moodle
+      tier: frontend
+      volume: moodle-html      # ← selector específico v3
+---
+# ── PVC: Moodle Data ──────────────────────────────────────────────────────────
+# FIX v3: matchLabels incluye 'volume: moodle-data' → binding determinístico
+# al PV correcto (50Gi, /moodlek3s/moodle-data), no al de 10Gi de moodle-html.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: moodle-data-pvc
+  namespace: moodle-prod
+  labels:
+    app: moodle
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: local-raid
+  resources:
+    requests:
+      storage: 50Gi
+  selector:
+    matchLabels:
+      app: moodle
+      tier: frontend
+      volume: moodle-data      # ← selector específico v3

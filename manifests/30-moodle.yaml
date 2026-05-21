@@ -1,0 +1,147 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: moodle
+  namespace: moodle-prod
+  labels:
+    app: moodle
+    tier: frontend
+spec:
+  # INSTALACIÓN INICIAL: 1 réplica para evitar que múltiples pods
+  # ejecuten admin/cli/install.php simultáneamente y se corrompan.
+  # El script escala a 3 réplicas HA automáticamente tras la instalación.
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: moodle
+  template:
+    metadata:
+      labels:
+        app: moodle
+        tier: frontend
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: k3s-moodle-master
+      securityContext:
+        fsGroup: 1001
+      initContainers:
+      - name: wait-for-db
+        image: busybox:1.36
+        command:
+        - sh
+        - -c
+        - |
+          echo "Esperando MariaDB..."
+          until nc -z mariadb 3306; do
+            sleep 5
+          done
+          echo "MariaDB OK"
+          echo "Esperando Redis..."
+          until nc -z redis 6379; do
+            sleep 3
+          done
+          echo "Redis OK"
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "50m"
+      containers:
+      - name: moodle
+        image: localhost:5000/moodle-apache:5.1-k3s-raid
+        # FIX v4: Always → K3s hace pull desde registry local en cada pod.
+        # Con IfNotPresent buscaba en cache local de containerd (vacío),
+        # fallaba, e intentaba Docker Hub donde la imagen no existe.
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: moodle-config
+        - secretRef:
+            name: moodle-secrets
+        volumeMounts:
+        - name: moodle-html
+          mountPath: /var/www/html
+        - name: moodle-data
+          mountPath: /var/www/moodledata
+
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /login/index.php
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /login/index.php
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /login/index.php
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+      volumes:
+      - name: moodle-html
+        persistentVolumeClaim:
+          claimName: moodle-html-pvc
+      - name: moodle-data
+        persistentVolumeClaim:
+          claimName: moodle-data-pvc
+
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - moodle
+              topologyKey: kubernetes.io/hostname
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: moodle
+  namespace: moodle-prod
+  labels:
+    app: moodle
+  annotations:
+    traefik.ingress.kubernetes.io/service.serversscheme: http
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  selector:
+    app: moodle

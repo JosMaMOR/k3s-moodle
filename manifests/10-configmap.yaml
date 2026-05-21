@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: moodle-config
+  namespace: moodle-prod
+data:
+  IMAGE_VERSION: "5.1"
+  MOODLE_VERSION: "5.1.3"
+
+  # MariaDB
+  MARIADB_HOST: "mariadb"
+  MARIADB_PORT: "3306"
+  MARIADB_DATABASE: "moodle"
+  MARIADB_USER: "moodleTESOEM"
+  MARIADB_CHARACTER_SET: "utf8mb4"
+  MARIADB_COLLATE: "utf8mb4_unicode_ci"
+
+  # Moodle DB
+  MOODLE_DB_HOST: "mariadb"
+  MOODLE_DB_PORT: "3306"
+  MOODLE_DB_NAME: "moodle"
+  MOODLE_DB_USER: "moodleTESOEM"
+
+  # Redis
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+
+  # Moodle
+  MOODLE_URL: "https://mcc.tesoem.edu.mx"
+  MOODLE_LANG: "es_mx"
+  MOODLE_CHMOD: "2777"
+  MOODLE_FULLNAME: "Plataforma Educativa TESOEM"
+  MOODLE_SHORTNAME: "TESOEM-Moodle"
+  MOODLE_ADMIN_USER: "admin"
+  MOODLE_ADMIN_EMAIL: "admin@tesoem.edu.mx"
+  #MOODLE_DIRROOT: "/var/www/html/public"
+  # DB install
+  DB_TYPE: "mariadb"
+  DB_HOST: "mariadb"
+  DB_PORT: "3306"
+  DB_NAME: "moodle"
+  DB_USER: "moodleTESOEM"
+
+  # K3s
+  ENABLE_CRON: "false"
+  K3S_MODE: "true"
+
+  # SSL
+  SERVER_NAME: "mcc.tesoem.edu.mx"
+  SSL_DIR: "/etc/apache2/ssl"
+  SSL_COUNTRY: "MX"
+  SSL_STATE: "Mexico"
+  SSL_CITY: "Tecamachalco"
+  SSL_ORG: "TESOEM"
+  SSL_OU: "SISTEMAS"
+  SSL_DAYS: "365"
+  SSL_SAN: "DNS:mcc.tesoem.edu.mx,DNS:localhost,IP:127.0.0.1"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mariadb-config
+  namespace: moodle-prod
+data:
+  MARIADB_DATABASE: "moodle"
+  MARIADB_USER: "moodleTESOEM"
+  MARIADB_CHARACTER_SET: "utf8mb4"
+  MARIADB_COLLATE: "utf8mb4_unicode_ci"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: moodle-prod
+data:
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"

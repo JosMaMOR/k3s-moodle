@@ -1,0 +1,14 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-raid
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: kubernetes.io/no-provisioner
+# Immediate: el PV se vincula al PVC en el momento de su creación,
+# sin esperar a que un Pod lo consuma. Necesario para que el loop
+# de verificación "Bound" del script funcione correctamente.
+# WaitForFirstConsumer causaba un deadlock: el script esperaba Bound
+# antes de crear pods, pero el binding nunca ocurría sin un pod activo.
+volumeBindingMode: Immediate
+reclaimPolicy: Retain

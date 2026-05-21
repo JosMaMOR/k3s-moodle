@@ -1,0 +1,74 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: moodle-cron
+  namespace: moodle-prod
+  labels:
+    app: moodle-cron
+spec:
+  schedule: "*/1 * * * *"
+  # INSTALACIÓN: CronJob arranca SUSPENDIDO para evitar ejecuciones
+  # durante la instalación de Moodle. El script lo activa en Fase 2
+  # una vez confirmado que config.php existe y la BD está lista.
+  # Sin esto, el cron falla con "Cron is disabled" o "config.php not found"
+  # porque Moodle aún no terminó de instalarse.
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 60
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 300
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          nodeSelector:
+            kubernetes.io/hostname: k3s-moodle-master
+          initContainers:
+          - name: wait-for-db
+            image: busybox:1.36
+            command:
+            - sh
+            - -c
+            - "until nc -z mariadb 3306 && nc -z redis 6379; do sleep 5; done"
+          containers:
+          - name: cron
+            image: localhost:5000/moodle-apache:5.1-k3s-raid
+            # FIX v4: Always → pull desde registry local, no desde Docker Hub
+            imagePullPolicy: Always
+            command:
+            - /bin/bash
+            - -c
+            - |
+              # Moodle 5.1: config.php vive en public/
+              # cron.php hace require('../../config.php') desde admin/cli/
+              # subiendo 2 niveles llega a /var/www/html/ donde está el symlink
+              # El symlink public/config.php → config.php debe existir
+              if [ ! -f /var/www/html/config.php ] && [ -f /var/www/html/public/config.php ]; then
+                ln -sf /var/www/html/public/config.php /var/www/html/config.php
+              fi
+              exec /usr/bin/php /var/www/html/admin/cli/cron.php --force
+            envFrom:
+            - configMapRef:
+                name: moodle-config
+            - secretRef:
+                name: moodle-secrets
+            volumeMounts:
+            # FIX v3: readOnly: true en el mount del contenedor (no en el PVC).
+            # cron.php solo lee código PHP de html/, no necesita escribir aquí.
+            - name: moodle-html
+              mountPath: /var/www/html
+              readOnly: true
+            # moodle-data sí necesita escritura: cachés, sesiones, temp files
+            - name: moodle-data
+              mountPath: /var/www/moodledata
+          volumes:
+          - name: moodle-html
+            persistentVolumeClaim:
+              claimName: moodle-html-pvc
+              # readOnly NO va aquí — va en volumeMount del contenedor
+          - name: moodle-data
+            persistentVolumeClaim:
+              claimName: moodle-data-pvc

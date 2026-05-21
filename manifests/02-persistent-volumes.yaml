@@ -1,0 +1,113 @@
+# ── PV: MariaDB ──────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mariadb-pv
+  labels:
+    app: mariadb
+    tier: database
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce           # Solo un pod a la vez (StatefulSet 1 réplica)
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-raid
+  volumeMode: Filesystem
+  local:
+    path: /moodlek3s/mariadb
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - k3s-moodle-master
+---
+# ── PV: Redis ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: redis-pv
+  labels:
+    app: redis
+    tier: cache
+spec:
+  capacity:
+    storage: 2Gi
+  accessModes:
+    - ReadWriteOnce           # Solo un pod (Deployment 1 réplica)
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-raid
+  volumeMode: Filesystem
+  local:
+    path: /moodlek3s/redis
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - k3s-moodle-master
+---
+# ── PV: Moodle HTML ───────────────────────────────────────────────────────────
+# ReadWriteMany → montado simultáneamente por 3 réplicas Moodle + CronJob
+# FIX v3: label 'volume: moodle-html' para binding selectivo desde el PVC
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: moodle-html-pv
+  labels:
+    app: moodle
+    tier: frontend
+    volume: moodle-html        # ← label diferenciadora v3
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteMany           # Múltiples pods en el mismo nodo
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-raid
+  volumeMode: Filesystem
+  local:
+    path: /moodlek3s/moodle-html
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - k3s-moodle-master
+---
+# ── PV: Moodle Data ───────────────────────────────────────────────────────────
+# ReadWriteMany → moodledata compartido entre réplicas y CronJob
+# FIX v3: label 'volume: moodle-data' para binding selectivo desde el PVC
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: moodle-data-pv
+  labels:
+    app: moodle
+    tier: frontend
+    volume: moodle-data        # ← label diferenciadora v3
+spec:
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteMany           # Múltiples pods en el mismo nodo
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-raid
+  volumeMode: Filesystem
+  local:
+    path: /moodlek3s/moodle-data
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - k3s-moodle-master
