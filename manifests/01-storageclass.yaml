@@ -1,3 +1,46 @@
+# ============================================================================
+# StorageClasses del stack Moodle HA
+# ============================================================================
+# Este stack usa DOS clases de almacenamiento con propósitos distintos:
+#   1. longhorn-moodle → almacenamiento replicado RWX para los volúmenes
+#      compartidos de Moodle (código + moodledata). Longhorn replica los
+#      datos entre nodos automáticamente.
+#   2. local-raid → almacenamiento local estático para MariaDB (Galera maneja
+#      su propia replicación) y Redis (caché, pérdida tolerable).
+# ----------------------------------------------------------------------------
+
+# ── StorageClass 1: Longhorn (para Moodle, RWX replicado) ───────────────────
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-moodle
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+# driver.longhorn.io es el CSI de Longhorn: aprovisiona volúmenes dinámicamente,
+# a diferencia de no-provisioner que exige declarar PVs a mano.
+provisioner: driver.longhorn.io
+# Permite agrandar el volumen sin recrearlo (útil si moodledata crece).
+allowVolumeExpansion: true
+# Retain: conserva los datos aunque se borre el PVC. Más seguro para Moodle.
+reclaimPolicy: Retain
+# Immediate: Longhorn crea el volumen al aplicar el PVC, igual que tu local-raid.
+volumeBindingMode: Immediate
+parameters:
+  # numberOfReplicas: copias de los datos entre nodos.
+  #   "2" en producción (Blacksea + koilake).
+  #   "1" PARA PRUEBAS EN UN SOLO NODO (si no, el volumen queda "Degraded").
+  numberOfReplicas: "1"
+  # Minutos antes de descartar una réplica de un nodo caído.
+  staleReplicaTimeout: "30"
+  # Sistema de archivos del volumen.
+  fsType: "ext4"
+  # nodeSelector: solo nodos con el tag "storage" reciben réplicas.
+  # La Raspberry Pi nunca llevará este tag → queda excluida de almacenar datos.
+  nodeSelector: "storage"
+---
+# ── StorageClass 2: local-raid (para MariaDB y Redis) ───────────────────────
+# SIN CAMBIOS respecto a tu versión actual. MariaDB y Redis siguen usando
+# almacenamiento local. Galera replica la BD a nivel de aplicación.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:

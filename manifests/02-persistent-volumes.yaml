@@ -1,3 +1,18 @@
+# ============================================================================
+# PersistentVolumes — almacenamiento local estático
+# ============================================================================
+# IMPORTANTE: Este archivo SOLO declara los PVs de MariaDB y Redis.
+#
+# Los volúmenes de Moodle (moodle-html, moodle-data) YA NO se declaran aquí.
+# Longhorn los aprovisiona dinámicamente cuando se aplican sus PVCs — no hay
+# que declarar un PV a mano para almacenamiento gestionado por Longhorn.
+#
+# MariaDB y Redis siguen usando almacenamiento local porque:
+#   - MariaDB: Galera replica la BD a nivel de aplicación. Cada nodo necesita
+#     su propio disco local rápido; Longhorn aquí sería replicación redundante.
+#   - Redis: es caché. Pérdida tolerable, no amerita replicación distribuida.
+# ----------------------------------------------------------------------------
+
 # ── PV: MariaDB ──────────────────────────────────────────────────────────────
 apiVersion: v1
 kind: PersistentVolume
@@ -23,7 +38,7 @@ spec:
         - key: kubernetes.io/hostname
           operator: In
           values:
-          - k3s-moodle-master
+          - k3s-moodle-master # <---- Hostname del nodo
 ---
 # ── PV: Redis ─────────────────────────────────────────────────────────────────
 apiVersion: v1
@@ -50,7 +65,7 @@ spec:
         - key: kubernetes.io/hostname
           operator: In
           values:
-          - k3s-moodle-master
+          - k3s-moodle-master # <----- Hostname del nodo
 ---
 # ── PV: Moodle HTML ───────────────────────────────────────────────────────────
 # ReadWriteMany → montado simultáneamente por 3 réplicas Moodle + CronJob
@@ -73,36 +88,6 @@ spec:
   volumeMode: Filesystem
   local:
     path: /moodlek3s/moodle-html
-  nodeAffinity:
-    required:
-      nodeSelectorTerms:
-      - matchExpressions:
-        - key: kubernetes.io/hostname
-          operator: In
-          values:
-          - k3s-moodle-master
----
-# ── PV: Moodle Data ───────────────────────────────────────────────────────────
-# ReadWriteMany → moodledata compartido entre réplicas y CronJob
-# FIX v3: label 'volume: moodle-data' para binding selectivo desde el PVC
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: moodle-data-pv
-  labels:
-    app: moodle
-    tier: frontend
-    volume: moodle-data        # ← label diferenciadora v3
-spec:
-  capacity:
-    storage: 50Gi
-  accessModes:
-    - ReadWriteMany           # Múltiples pods en el mismo nodo
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: local-raid
-  volumeMode: Filesystem
-  local:
-    path: /moodlek3s/moodle-data
   nodeAffinity:
     required:
       nodeSelectorTerms:
