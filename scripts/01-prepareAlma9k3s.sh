@@ -520,6 +520,9 @@ install_k3s() {
   # entornos con recursos limitados. Incluye: server (control plane + worker),
   # containerd, flannel (CNI), CoreDNS, Traefik (ingress), local-path-provisioner.
 
+  # Asegurar que /usr/local/bin esté en el PATH (necesario para k3s y kubectl)
+  export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+  
   log_sub "Descargando e instalando K3s..."
 
   # Construir el comando de instalación
