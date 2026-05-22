@@ -264,6 +264,28 @@ install_dependencies() {
 
   # Verificar que bash-completion esté cargado en la sesión actual
   [ -f /etc/bash_completion ] && source /etc/bash_completion 2>/dev/null || true
+
+  log_sub "Instalando dependencias de Longhorn..."
+  # iscsi-initiator-utils: daemon y cliente iSCSI. Longhorn monta sus volúmenes
+  #   de bloque vía iSCSI en cada nodo worker. Sin esto los PVCs no pueden montarse.
+  # nfs-utils: cliente NFS requerido para volúmenes RWX (ReadWriteMany).
+  #   Longhorn implementa RWX internamente con NFS. Moodle lo necesita para que
+  #   múltiples pods lean y escriban el mismo volumen simultáneamente.
+  # cryptsetup: herramienta de cifrado LUKS/dm-crypt. El instalador de Longhorn
+  #   la requiere aunque no uses cifrado activamente en los volúmenes.
+  # device-mapper: framework del kernel para volúmenes lógicos y mapeo de
+  #   dispositivos. Generalmente ya viene en AlmaLinux 9, pero lo aseguramos.
+  # util-linux: provee blkid, lsblk, findmnt — comandos que Longhorn Manager
+  #   ejecuta para inspeccionar discos y puntos de montaje del nodo.
+  dnf install -y \
+    iscsi-initiator-utils \
+    nfs-utils \
+    cryptsetup \
+    device-mapper \
+    util-linux \
+    2>&1 | tail -5
+  log_ok "Dependencias de Longhorn instaladas."
+
 }
 
 # ============================================================================
@@ -366,6 +388,29 @@ EOF
 
   modprobe br_netfilter 2>/dev/null && log_ok "Módulo br_netfilter cargado." || log_warn "br_netfilter no se pudo cargar."
   modprobe overlay       2>/dev/null && log_ok "Módulo overlay cargado."       || log_warn "overlay no se pudo cargar."
+
+  # ── 4.2b: Módulos requeridos por Longhorn ──────────────────────────────────
+  # iscsi_tcp: implementa iSCSI sobre TCP en el kernel.
+  #   Longhorn monta cada volumen de bloque en los nodos vía iSCSI.
+  #   Sin este módulo, los pods que pidan un PVC de Longhorn no pueden arrancar.
+  # dm_crypt: cifrado de dispositivos de bloque.
+  #   Lo requiere cryptsetup y el propio Longhorn para encriptación de volúmenes.
+  cat >> /etc/modules-load.d/k3s.conf << 'EOF'
+# Módulos requeridos por Longhorn
+# iscsi_tcp: iSCSI sobre TCP para montaje de volúmenes de bloque
+# dm_crypt:  cifrado de dispositivos de bloque
+iscsi_tcp
+dm_crypt
+EOF
+
+  modprobe iscsi_tcp 2>/dev/null && log_ok "Módulo iscsi_tcp cargado." || log_warn "iscsi_tcp no se pudo cargar — puede estar integrado en el kernel."
+  modprobe dm_crypt  2>/dev/null && log_ok "Módulo dm_crypt cargado."  || log_warn "dm_crypt no se pudo cargar — puede estar integrado en el kernel."
+
+  # iscsid: daemon que gestiona las sesiones iSCSI activas en el nodo.
+  # Debe estar corriendo antes de que Longhorn intente montar cualquier volumen.
+  systemctl enable --now iscsid 2>/dev/null \
+    && log_ok "iscsid habilitado y activo." \
+    || log_warn "iscsid no se pudo iniciar — verifica con: systemctl status iscsid"
 
   # ── 4.3: Parámetros sysctl para Kubernetes ──────────────────────────────────
   log_sub "Configurando parámetros del kernel (sysctl)..."
@@ -502,8 +547,18 @@ EOF
     firewall-cmd --permanent --zone=trusted --add-source=10.43.0.0/16  # services
     firewall-cmd --permanent --zone=trusted --add-interface=lo
 
+    # Puertos de Longhorn (comunicación entre nodos del clúster)
+    # 9500-9503/tcp: Longhorn Manager (API interna) + Engine (por volumen)
+    # 2049/tcp:      NFS — Longhorn lo usa internamente para volúmenes RWX
+    # 111/tcp:       RPC portmapper, requerido por NFS
+    # 20048/tcp:     mountd de NFS
+    firewall-cmd --permanent --add-port=9500-9503/tcp  # Longhorn Manager + Engine
+    firewall-cmd --permanent --add-port=2049/tcp        # NFS (RWX)
+    firewall-cmd --permanent --add-port=111/tcp         # RPC portmapper
+    firewall-cmd --permanent --add-port=20048/tcp       # NFS mountd
+    
     firewall-cmd --reload
-    log_ok "Firewall configurado con puertos de K3s y Moodle."
+    log_ok "Firewall configurado con puertos de K3s, Moodle y Longhorn."
   else
     log_warn "firewalld no está activo — omitiendo configuración de firewall."
     log_info "Si usas nftables o iptables directamente, abre los puertos: 6443/tcp, 80/tcp, 443/tcp, 8080/tcp, 8443/tcp"
@@ -1033,7 +1088,6 @@ main() {
   install_k3s              # Paso 5: K3s + kubectl + kubeconfig
   prepare_storage          # Paso 6: /moodlek3s + permisos
   import_moodle_image      # Paso 7: Podman → containerd k8s.io
-  install_longhorn_deps    # Paso 7.5: prerequisitos de Longhorn (iSCSI, NFS, módulos)
   install_diagnostic_tools # Paso 8: stern, k9s, crictl
   configure_system         # Paso 9: hostname, timezone, aliases
   verify_environment       # Paso 10: verificación final
