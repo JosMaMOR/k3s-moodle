@@ -181,6 +181,49 @@ kubectl apply -f 00-namespace.yaml
 echo "[*] Creando StorageClass..."
 
 cat > 01-storageclass.yaml << 'EOF'
+# ============================================================================
+# StorageClasses del stack Moodle HA
+# ============================================================================
+# Este stack usa DOS clases de almacenamiento con propósitos distintos:
+#   1. longhorn-moodle → almacenamiento replicado RWX para los volúmenes
+#      compartidos de Moodle (código + moodledata). Longhorn replica los
+#      datos entre nodos automáticamente.
+#   2. local-raid → almacenamiento local estático para MariaDB (Galera maneja
+#      su propia replicación) y Redis (caché, pérdida tolerable).
+# ----------------------------------------------------------------------------
+
+# ── StorageClass 1: Longhorn (para Moodle, RWX replicado) ───────────────────
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-moodle
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+# driver.longhorn.io es el CSI de Longhorn: aprovisiona volúmenes dinámicamente,
+# a diferencia de no-provisioner que exige declarar PVs a mano.
+provisioner: driver.longhorn.io
+# Permite agrandar el volumen sin recrearlo (útil si moodledata crece).
+allowVolumeExpansion: true
+# Retain: conserva los datos aunque se borre el PVC. Más seguro para Moodle.
+reclaimPolicy: Retain
+# Immediate: Longhorn crea el volumen al aplicar el PVC, igual que tu local-raid.
+volumeBindingMode: Immediate
+parameters:
+  # numberOfReplicas: copias de los datos entre nodos.
+  #   "2" en producción (Blacksea + koilake).
+  #   "1" PARA PRUEBAS EN UN SOLO NODO (si no, el volumen queda "Degraded").
+  numberOfReplicas: "1"
+  # Minutos antes de descartar una réplica de un nodo caído.
+  staleReplicaTimeout: "30"
+  # Sistema de archivos del volumen.
+  fsType: "ext4"
+  # nodeSelector: solo nodos con el tag "storage" reciben réplicas.
+  # La Raspberry Pi nunca llevará este tag → queda excluida de almacenar datos.
+  nodeSelector: "storage"
+---
+# ── StorageClass 2: local-raid (para MariaDB y Redis) ───────────────────────
+# SIN CAMBIOS respecto a tu versión actual. MariaDB y Redis siguen usando
+# almacenamiento local. Galera replica la BD a nivel de aplicación.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -222,6 +265,21 @@ kubectl apply -f 01-storageclass.yaml
 echo "[*] Creando PersistentVolumes..."
 
 cat > 02-persistent-volumes.yaml << 'EOF'
+# ============================================================================
+# PersistentVolumes — almacenamiento local estático
+# ============================================================================
+# IMPORTANTE: Este archivo SOLO declara los PVs de MariaDB y Redis.
+#
+# Los volúmenes de Moodle (moodle-html, moodle-data) YA NO se declaran aquí.
+# Longhorn los aprovisiona dinámicamente cuando se aplican sus PVCs — no hay
+# que declarar un PV a mano para almacenamiento gestionado por Longhorn.
+#
+# MariaDB y Redis siguen usando almacenamiento local porque:
+#   - MariaDB: Galera replica la BD a nivel de aplicación. Cada nodo necesita
+#     su propio disco local rápido; Longhorn aquí sería replicación redundante.
+#   - Redis: es caché. Pérdida tolerable, no amerita replicación distribuida.
+# ----------------------------------------------------------------------------
+
 # ── PV: MariaDB ──────────────────────────────────────────────────────────────
 apiVersion: v1
 kind: PersistentVolume
@@ -247,7 +305,7 @@ spec:
         - key: kubernetes.io/hostname
           operator: In
           values:
-          - k3s-moodle-master
+          - k3s-moodle-master # <---- Hostname del nodo
 ---
 # ── PV: Redis ─────────────────────────────────────────────────────────────────
 apiVersion: v1
@@ -274,7 +332,7 @@ spec:
         - key: kubernetes.io/hostname
           operator: In
           values:
-          - k3s-moodle-master
+          - k3s-moodle-master # <----- Hostname del nodo
 ---
 # ── PV: Moodle HTML ───────────────────────────────────────────────────────────
 # ReadWriteMany → montado simultáneamente por 3 réplicas Moodle + CronJob
@@ -305,36 +363,6 @@ spec:
           operator: In
           values:
           - k3s-moodle-master
----
-# ── PV: Moodle Data ───────────────────────────────────────────────────────────
-# ReadWriteMany → moodledata compartido entre réplicas y CronJob
-# FIX v3: label 'volume: moodle-data' para binding selectivo desde el PVC
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: moodle-data-pv
-  labels:
-    app: moodle
-    tier: frontend
-    volume: moodle-data        # ← label diferenciadora v3
-spec:
-  capacity:
-    storage: 50Gi
-  accessModes:
-    - ReadWriteMany           # Múltiples pods en el mismo nodo
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: local-raid
-  volumeMode: Filesystem
-  local:
-    path: /moodlek3s/moodle-data
-  nodeAffinity:
-    required:
-      nodeSelectorTerms:
-      - matchExpressions:
-        - key: kubernetes.io/hostname
-          operator: In
-          values:
-          - k3s-moodle-master
 EOF
 
 kubectl apply -f 02-persistent-volumes.yaml
@@ -351,6 +379,15 @@ kubectl apply -f 02-persistent-volumes.yaml
 echo "[*] Creando PersistentVolumeClaims..."
 
 cat > 03-persistent-volume-claims.yaml << 'EOF'
+# ============================================================================
+# PersistentVolumeClaims
+# ============================================================================
+# MariaDB y Redis: reclaman PVs locales estáticos (storageClassName: local-raid)
+#   mediante un selector de labels, igual que antes.
+# Moodle (html y data): reclaman almacenamiento a Longhorn, que lo aprovisiona
+#   dinámicamente. SIN selector — no hay PV preexistente que emparejar.
+# ----------------------------------------------------------------------------
+
 # ── PVC: MariaDB ──────────────────────────────────────────────────────────────
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -368,7 +405,7 @@ spec:
       storage: 20Gi
   selector:
     matchLabels:
-      app: mariadb
+      app: mariadb-pv
 ---
 # ── PVC: Redis ────────────────────────────────────────────────────────────────
 apiVersion: v1
@@ -392,6 +429,9 @@ spec:
 # ── PVC: Moodle HTML ──────────────────────────────────────────────────────────
 # FIX v3: matchLabels incluye 'volume: moodle-html' → binding determinístico
 # al PV correcto (10Gi, /moodlek3s/moodle-html), no al de 50Gi de moodle-data.
+# CAMBIO: ahora reclama a Longhorn (longhorn-moodle), no a local-raid.
+# Longhorn crea un volumen RWX de 10Gi a la medida. Sin selector: no hay un PV
+# preexistente que emparejar, Longhorn aprovisiona uno nuevo dinámicamente.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -399,22 +439,20 @@ metadata:
   namespace: moodle-prod
   labels:
     app: moodle
+    volume: moodle-html
 spec:
   accessModes:
-    - ReadWriteMany
-  storageClassName: local-raid
+    - ReadWriteMany          # RWX real entre nodos (Longhorn vía NFS interno)
+  storageClassName: longhorn-moodle
   resources:
     requests:
       storage: 10Gi
-  selector:
-    matchLabels:
-      app: moodle
-      tier: frontend
-      volume: moodle-html      # ← selector específico v3
 ---
 # ── PVC: Moodle Data ──────────────────────────────────────────────────────────
 # FIX v3: matchLabels incluye 'volume: moodle-data' → binding determinístico
 # al PV correcto (50Gi, /moodlek3s/moodle-data), no al de 10Gi de moodle-html.
+# CAMBIO: ahora reclama a Longhorn (longhorn-moodle), no a local-raid.
+# Volumen RWX de 50Gi para moodledata, compartido entre todas las réplicas.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -422,18 +460,14 @@ metadata:
   namespace: moodle-prod
   labels:
     app: moodle
+    volume: moodle-data
 spec:
   accessModes:
-    - ReadWriteMany
-  storageClassName: local-raid
+    - ReadWriteMany          # RWX real entre nodos (Longhorn vía NFS interno)
+  storageClassName: longhorn-moodle
   resources:
     requests:
       storage: 50Gi
-  selector:
-    matchLabels:
-      app: moodle
-      tier: frontend
-      volume: moodle-data      # ← selector específico v3
 EOF
 
 kubectl apply -f 03-persistent-volume-claims.yaml
