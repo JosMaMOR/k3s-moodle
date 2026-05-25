@@ -131,15 +131,30 @@ if kubectl get namespace longhorn-system >/dev/null 2>&1; then
 
     echo "[*] Esperando a que el longhorn-manager este listo (hasta 300s)..."
 
-    if ! kubectl rollout status daemonset/longhorn-manager \
-       -n ${LONGHORN_NAMESPACE} --timeout=300s 2>/dev/null; then
-    echo ""
-    echo "  ╔══════════════════════════════════════════════════════════════╗"
-    echo "  ║  ERROR: Longhorn no quedó listo en 300s                      ║"
-    echo "  ║  Revisa: kubectl get pods -n longhorn-system                 ║"
-    echo "  ╚══════════════════════════════════════════════════════════════╝"
-    exit 1
+    # Primero esperar a que el objeto DaemonSet EXISTA. Tras 'kubectl apply',
+    # Kubernetes tarda unos segundos en crear el DaemonSet; si consultamos su
+    # rollout antes de que exista, 'rollout status' falla al instante (no por
+    # timeout real) y abortaría el script aunque Longhorn esté arrancando bien.
+    RETRIES=0
+    until kubectl get daemonset/longhorn-manager -n ${LONGHORN_NAMESPACE} >/dev/null 2>&1; do
+      sleep 3
+      RETRIES=$((RETRIES+1))
+      if [ $RETRIES -ge 20 ]; then
+        echo "  ERROR: el DaemonSet longhorn-manager no apareció en 60s"
+        exit 1
+      fi
+    done
 
+    # Ahora sí, esperar a que el rollout del DaemonSet termine. Sin 2>/dev/null
+    # para no enmascarar errores reales en la espera.
+    if ! kubectl rollout status daemonset/longhorn-manager \
+         -n ${LONGHORN_NAMESPACE} --timeout=300s; then
+      echo ""
+      echo "  ╔══════════════════════════════════════════════════════════════╗"
+      echo "  ║  ERROR: Longhorn no quedó listo en 300s                      ║"
+      echo "  ║  Revisa: kubectl get pods -n longhorn-system                 ║"
+      echo "  ╚══════════════════════════════════════════════════════════════╝"
+      exit 1
     fi
 fi
     echo "[*] Esperando a que el CSI driver de Longhorn se registre..."
@@ -153,7 +168,7 @@ fi
         exit 1
       fi
     done
-    echo "[*] ✓ Longhorn instalado y CSI driver registrado."    
+    echo "[*] Longhorn instalado y CSI driver registrado."    
 
 # ── CAMBIO LONGHORN: desmarcar el StorageClass default de K3s ──────────────────
 # K3s incluye 'local-path' marcado como StorageClass default. Si se queda como
