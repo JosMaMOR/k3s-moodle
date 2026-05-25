@@ -163,8 +163,8 @@ fi
     until kubectl get csidriver driver.longhorn.io >/dev/null 2>&1; do
       sleep 5
       RETRIES=$((RETRIES+1))
-      if [ $RETRIES -ge 24 ]; then
-        echo "  ERROR: el CSI driver de Longhorn no se registró en 120s"
+      if [ $RETRIES -ge 80 ]; then
+        echo "  ERROR: el CSI driver de Longhorn no se registró en 240s"
         exit 1
       fi
     done
@@ -483,8 +483,8 @@ for PVC in mariadb-pvc redis-pvc moodle-html-pvc moodle-data-pvc; do
   until kubectl get pvc "$PVC" -n moodle-prod -o jsonpath='{.status.phase}' 2>/dev/null | grep -q "Bound"; do
     sleep 3
     RETRIES=$((RETRIES+1))
-    if [ $RETRIES -ge 40 ]; then
-      echo " ERROR: $PVC no llegó a Bound en 120s"
+    if [ $RETRIES -ge 80 ]; then
+      echo " ERROR: $PVC no llegó a Bound en 240s"
       kubectl describe pvc "$PVC" -n moodle-prod
       exit 1
     fi
