@@ -141,7 +141,7 @@ if kubectl get namespace longhorn-system >/dev/null 2>&1; then
     exit 1
 
     fi
-
+fi
     echo "[*] Esperando a que el CSI driver de Longhorn se registre..."
     # El StorageClass no puede aprovisionar hasta que driver.longhorn.io exista.
     RETRIES=0
@@ -153,9 +153,7 @@ if kubectl get namespace longhorn-system >/dev/null 2>&1; then
         exit 1
       fi
     done
-    echo "[*] ✓ Longhorn instalado y CSI driver registrado."
-    
-fi
+    echo "[*] ✓ Longhorn instalado y CSI driver registrado."    
 
 # ── CAMBIO LONGHORN: desmarcar el StorageClass default de K3s ──────────────────
 # K3s incluye 'local-path' marcado como StorageClass default. Si se queda como
