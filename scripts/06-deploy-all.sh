@@ -2,6 +2,10 @@
 # 06-deploy-all.sh - Despliegue completo de Moodle HA en K3s
 # Ejecutar como root después de 05-build-image.sh
 #
+# INSTALACION DE LONGHORN WIP:
+#   - WIP Instalacion de Longhorn despues de creacion del registry - l 110
+#   - WIP Linea 281. Hacer algo para poder cambiar el numero de replicas de longhorn al ejecutar el script
+#
 # CORRECCIONES APLICADAS v6:
 #   - Despliegue en 2 fases:
 #     Fase 1: 1 réplica para instalación inicial (evita race condition)
@@ -103,12 +107,80 @@ echo "[*] Imagen ${MOODLE_IMAGE} disponible en el registry."
 mkdir -p ${MANIFEST_DIR}
 cd ${MANIFEST_DIR}
 
+# ==========================================
+# 1. INSTALACION LONGHORN
+# Idea
+# - Deberia agregar algo para poder poner argumentos para diferentes campos del script?
+# ==========================================
+
+echo "=========================================="
+echo "INSTALACION DE LONGHORN"
+echo "=========================================="
+
+echo "[*] Verificando instalacion de Longhorn"
+
+if kubectl get namespace longhorn-system >/dev/null 2>&1; then
+    
+    echo "[*] Longhorn ya existe con el namespace lonhorn-system. Omitiendo instalacion"
+    
+    else
+
+    echo "[*] Instalando Longhorn version 1.11.2"
+
+    kubectl apply -f https://raw.githubusercontent.com/longhorn/longhorn/v1.11.2/deploy/longhorn.yaml
+
+    echo "[*] Esperando a que el longhorn-manager este listo (hasta 300s)..."
+
+    if ! kubectl rollout status daemonset/longhorn-manager \
+       -n ${LONGHORN_NAMESPACE} --timeout=300s 2>/dev/null; then
+    echo ""
+    echo "  ╔══════════════════════════════════════════════════════════════╗"
+    echo "  ║  ERROR: Longhorn no quedó listo en 300s                      ║"
+    echo "  ║  Revisa: kubectl get pods -n longhorn-system                 ║"
+    echo "  ╚══════════════════════════════════════════════════════════════╝"
+    exit 1
+
+    fi
+
+    echo "[*] Esperando a que el CSI driver de Longhorn se registre..."
+    # El StorageClass no puede aprovisionar hasta que driver.longhorn.io exista.
+    RETRIES=0
+    until kubectl get csidriver driver.longhorn.io >/dev/null 2>&1; do
+      sleep 5
+      RETRIES=$((RETRIES+1))
+      if [ $RETRIES -ge 24 ]; then
+        echo "  ERROR: el CSI driver de Longhorn no se registró en 120s"
+        exit 1
+      fi
+    done
+    echo "[*] ✓ Longhorn instalado y CSI driver registrado."
+    
+fi
+
+# ── CAMBIO LONGHORN: desmarcar el StorageClass default de K3s ──────────────────
+# K3s incluye 'local-path' marcado como StorageClass default. Si se queda como
+# default, un PVC sin storageClassName explícito lo usaría en lugar de Longhorn.
+# Lo desmarcamos para que NINGÚN StorageClass sea default y todo sea explícito.
+if kubectl get storageclass local-path >/dev/null 2>&1; then
+  echo "[*] Desmarcando 'local-path' como StorageClass default de K3s..."
+  kubectl patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}' >/dev/null 2>&1 || true
+fi
+
+# ── CAMBIO LONGHORN: etiquetar este nodo para almacenamiento ──────────────────
+# El StorageClass longhorn-moodle usa nodeSelector: "storage". Sin este tag,
+# Longhorn no colocaría réplicas en el nodo. Para un solo nodo basta con
+# etiquetar el master. (Con más nodos: etiquetar cada nodo de datos; ver nota
+# al final.) El árbitro Raspberry Pi NUNCA se etiqueta → no almacena réplicas.
+echo "[*] Etiquetando nodo ${NODE_NAME} con tag de almacenamiento Longhorn..."
+kubectl annotate node ${NODE_NAME} node.longhorn.io/default-node-tags='["storage"]' --overwrite >/dev/null 2>&1 || true
+
 # Crear directorios base en el RAID si no existen
-echo "[*] Preparando directorios en RAID..."
+# ── CAMBIO LONGHORN: moodle-html y moodle-data YA NO se crean aquí ────────────
+# Longhorn gestiona el ciclo de vida de esos volúmenes (creación, permisos vía
+# fsGroup del pod). Solo MariaDB y Redis siguen necesitando directorios locales.
+echo "[*] Preparando directorios en RAID (solo MariaDB y Redis)..."
 mkdir -p ${RAID_BASE}/mariadb
 mkdir -p ${RAID_BASE}/redis
-mkdir -p ${RAID_BASE}/moodle-html
-mkdir -p ${RAID_BASE}/moodle-data
 
 # ── Detección de inicialización incompleta de MariaDB ─────────────────────────
 # Si el directorio tiene archivos InnoDB pero NO tiene mysql/db.frm o mysql/db.MAD
@@ -138,18 +210,16 @@ fi
 # Permisos por servicio — cada imagen corre con un uid distinto:
 #   uid 999  → mariadb:lts      (usuario interno: mysql) [Debian - auto-inicializa]
 #   uid 999  → redis:7-alpine   (usuario interno: redis)
-#   uid 1001 → moodle-apache    (usuario interno: www-data)
+# ── CAMBIO LONGHORN: moodle-html y moodle-data ya no se chmodean aquí ─────────
+# Sus permisos los resuelve el pod de Moodle vía securityContext.fsGroup: 1001
+# sobre el volumen que Longhorn monta. El chown/chmod del host ya no aplica
+# porque el volumen ya no es un directorio del RAID local.
+
 chown -R 999:999  ${RAID_BASE}/mariadb
 chmod -R 750      ${RAID_BASE}/mariadb
 
 chown -R 999:999  ${RAID_BASE}/redis
 chmod -R 750      ${RAID_BASE}/redis
-
-chown -R 1001:1001 ${RAID_BASE}/moodle-html
-chmod -R 2777      ${RAID_BASE}/moodle-html
-
-chown -R 1001:1001 ${RAID_BASE}/moodle-data
-chmod -R 2777      ${RAID_BASE}/moodle-data
 
 echo "[*] Permisos de directorios:"
 ls -la ${RAID_BASE}/
@@ -173,57 +243,15 @@ EOF
 kubectl apply -f 00-namespace.yaml
 
 # ==========================================
-# 2. STORAGECLASS LOCAL (hostPath sobre RAID)
+# 2. STORAGECLASS LOCAL (local-raid + longhorn-moodle
 # ==========================================
-# Usamos una StorageClass "no-provisioner" porque los PVs los creamos
-# manualmente apuntando a rutas concretas del RAID.
-# Esto es lo correcto en K3s single-node con almacenamiento local dedicado.
+# ── CAMBIO LONGHORN: ahora hay DOS StorageClasses ─────────────────────────────
+#   local-raid      → MariaDB y Redis (almacenamiento local en RAID, sin cambios)
+#   longhorn-moodle → moodle-html y moodle-data (RWX replicado por Longhorn)
 echo "[*] Creando StorageClass..."
 
 cat > 01-storageclass.yaml << 'EOF'
-# ============================================================================
-# StorageClasses del stack Moodle HA
-# ============================================================================
-# Este stack usa DOS clases de almacenamiento con propósitos distintos:
-#   1. longhorn-moodle → almacenamiento replicado RWX para los volúmenes
-#      compartidos de Moodle (código + moodledata). Longhorn replica los
-#      datos entre nodos automáticamente.
-#   2. local-raid → almacenamiento local estático para MariaDB (Galera maneja
-#      su propia replicación) y Redis (caché, pérdida tolerable).
-# ----------------------------------------------------------------------------
-
-# ── StorageClass 1: Longhorn (para Moodle, RWX replicado) ───────────────────
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: longhorn-moodle
-  annotations:
-    storageclass.kubernetes.io/is-default-class: "false"
-# driver.longhorn.io es el CSI de Longhorn: aprovisiona volúmenes dinámicamente,
-# a diferencia de no-provisioner que exige declarar PVs a mano.
-provisioner: driver.longhorn.io
-# Permite agrandar el volumen sin recrearlo (útil si moodledata crece).
-allowVolumeExpansion: true
-# Retain: conserva los datos aunque se borre el PVC. Más seguro para Moodle.
-reclaimPolicy: Retain
-# Immediate: Longhorn crea el volumen al aplicar el PVC, igual que tu local-raid.
-volumeBindingMode: Immediate
-parameters:
-  # numberOfReplicas: copias de los datos entre nodos.
-  #   "2" en producción (Blacksea + koilake).
-  #   "1" PARA PRUEBAS EN UN SOLO NODO (si no, el volumen queda "Degraded").
-  numberOfReplicas: "1"
-  # Minutos antes de descartar una réplica de un nodo caído.
-  staleReplicaTimeout: "30"
-  # Sistema de archivos del volumen.
-  fsType: "ext4"
-  # nodeSelector: solo nodos con el tag "storage" reciben réplicas.
-  # La Raspberry Pi nunca llevará este tag → queda excluida de almacenar datos.
-  nodeSelector: "storage"
----
-# ── StorageClass 2: local-raid (para MariaDB y Redis) ───────────────────────
-# SIN CAMBIOS respecto a tu versión actual. MariaDB y Redis siguen usando
-# almacenamiento local. Galera replica la BD a nivel de aplicación.
+# ── StorageClass 1: local-raid (MariaDB + Redis) — SIN CAMBIOS ───────────────
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -234,10 +262,29 @@ provisioner: kubernetes.io/no-provisioner
 # Immediate: el PV se vincula al PVC en el momento de su creación,
 # sin esperar a que un Pod lo consuma. Necesario para que el loop
 # de verificación "Bound" del script funcione correctamente.
-# WaitForFirstConsumer causaba un deadlock: el script esperaba Bound
-# antes de crear pods, pero el binding nunca ocurría sin un pod activo.
 volumeBindingMode: Immediate
 reclaimPolicy: Retain
+---
+# ── StorageClass 2: longhorn-moodle (moodle-html + moodle-data) ──────────────
+# driver.longhorn.io aprovisiona dinámicamente: no hay que declarar PVs a mano.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-moodle
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+parameters:
+  # numberOfReplicas viene de la variable LONGHORN_REPLICAS (1 en un nodo).
+  numberOfReplicas: "1"
+  staleReplicaTimeout: "30"
+  fsType: "ext4"
+  # nodeSelector: solo nodos con el tag "storage" reciben réplicas.
+  # La Raspberry Pi (árbitro) nunca lleva este tag → queda excluida.
+  nodeSelector: "storage"
 EOF
 
 kubectl apply -f 01-storageclass.yaml
@@ -245,41 +292,14 @@ kubectl apply -f 01-storageclass.yaml
 # ==========================================
 # 3. PERSISTENT VOLUMES (hostPath → RAID)
 # ==========================================
-# Se crean 4 PVs estáticos, uno por servicio.
-# hostPath apunta a /moodlek3s/<servicio> en el nodo master.
-# nodeAffinity garantiza que el PV solo puede ser usado por pods
-# que se ejecuten en k3s-moodle-master (donde está el RAID).
-#
-# FIX v3: Los PVs de moodle-html y moodle-data llevan label
-# 'volume: moodle-html' / 'volume: moodle-data' para que sus PVCs
-# puedan usar selector.matchLabels específico y no compitan entre sí.
-# Sin esta label diferenciadora, ambos PVCs tienen el mismo
-# matchLabels (app: moodle + tier: frontend) y el binding puede
-# asignar el PV equivocado al PVC equivocado.
-#
-# Tamaños recomendados:
-#   mariadb:      20Gi  (base de datos Moodle completa)
-#   redis:         2Gi  (caché en memoria + AOF persistence)
-#   moodle-html:  10Gi  (código PHP de Moodle ~600MB + espacio para plugins)
-#   moodle-data:  50Gi  (archivos subidos, backups, temp files)
+# ── CAMBIO LONGHORN: solo quedan MariaDB y Redis ─────────────────────────────
+# Los PVs de moodle-html y moodle-data DESAPARECEN: Longhorn los aprovisiona
+# dinámicamente al aplicar sus PVCs. Ya no se declaran a mano.
+# MariaDB y Redis siguen con PVs hostPath estáticos sobre el RAID local.
+
 echo "[*] Creando PersistentVolumes..."
 
 cat > 02-persistent-volumes.yaml << 'EOF'
-# ============================================================================
-# PersistentVolumes — almacenamiento local estático
-# ============================================================================
-# IMPORTANTE: Este archivo SOLO declara los PVs de MariaDB y Redis.
-#
-# Los volúmenes de Moodle (moodle-html, moodle-data) YA NO se declaran aquí.
-# Longhorn los aprovisiona dinámicamente cuando se aplican sus PVCs — no hay
-# que declarar un PV a mano para almacenamiento gestionado por Longhorn.
-#
-# MariaDB y Redis siguen usando almacenamiento local porque:
-#   - MariaDB: Galera replica la BD a nivel de aplicación. Cada nodo necesita
-#     su propio disco local rápido; Longhorn aquí sería replicación redundante.
-#   - Redis: es caché. Pérdida tolerable, no amerita replicación distribuida.
-# ----------------------------------------------------------------------------
-
 # ── PV: MariaDB ──────────────────────────────────────────────────────────────
 apiVersion: v1
 kind: PersistentVolume
@@ -305,7 +325,7 @@ spec:
         - key: kubernetes.io/hostname
           operator: In
           values:
-          - k3s-moodle-master # <---- Hostname del nodo
+          - k3s-moodle-master
 ---
 # ── PV: Redis ─────────────────────────────────────────────────────────────────
 apiVersion: v1
@@ -325,36 +345,6 @@ spec:
   volumeMode: Filesystem
   local:
     path: /moodlek3s/redis
-  nodeAffinity:
-    required:
-      nodeSelectorTerms:
-      - matchExpressions:
-        - key: kubernetes.io/hostname
-          operator: In
-          values:
-          - k3s-moodle-master # <----- Hostname del nodo
----
-# ── PV: Moodle HTML ───────────────────────────────────────────────────────────
-# ReadWriteMany → montado simultáneamente por 3 réplicas Moodle + CronJob
-# FIX v3: label 'volume: moodle-html' para binding selectivo desde el PVC
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: moodle-html-pv
-  labels:
-    app: moodle
-    tier: frontend
-    volume: moodle-html        # ← label diferenciadora v3
-spec:
-  capacity:
-    storage: 10Gi
-  accessModes:
-    - ReadWriteMany           # Múltiples pods en el mismo nodo
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: local-raid
-  volumeMode: Filesystem
-  local:
-    path: /moodlek3s/moodle-html
   nodeAffinity:
     required:
       nodeSelectorTerms:
@@ -405,7 +395,7 @@ spec:
       storage: 20Gi
   selector:
     matchLabels:
-      app: mariadb-pv
+      app: mariadb
 ---
 # ── PVC: Redis ────────────────────────────────────────────────────────────────
 apiVersion: v1
