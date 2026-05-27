@@ -127,6 +127,8 @@ if kubectl get namespace longhorn-system >/dev/null 2>&1; then
 
     echo "[*] Instalando Longhorn version 1.11.2"
 
+    kubectl annotate node ${NODE_NAME} node.longhorn.io/default-disks-config='[{"path":"/moodlek3s/longhorn","allowScheduling":true,"storageReserved":0,"tags":["storage"]}]' --overwrite
+    
     kubectl apply -f https://raw.githubusercontent.com/longhorn/longhorn/v1.11.2/deploy/longhorn.yaml
 
     echo "[*] Esperando a que el longhorn-manager este listo (hasta 300s)..."
