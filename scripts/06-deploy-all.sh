@@ -5,6 +5,7 @@
 # INSTALACION DE LONGHORN WIP:
 #   - WIP Instalacion de Longhorn despues de creacion del registry - l 110
 #   - WIP Linea 281. Hacer algo para poder cambiar el numero de replicas de longhorn al ejecutar el script
+#   - WIP Linea 471 - Tamaño de volumen para moodle. En prod deben ser 50Gi
 #
 # CORRECCIONES APLICADAS v6:
 #   - Despliegue en 2 fases:
@@ -472,7 +473,7 @@ spec:
   storageClassName: longhorn-moodle
   resources:
     requests:
-      storage: 50Gi
+      storage: 10Gi
 EOF
 
 kubectl apply -f 03-persistent-volume-claims.yaml
