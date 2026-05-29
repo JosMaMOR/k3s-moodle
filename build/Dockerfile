@@ -144,6 +144,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     php-redis \
     redis-tools \
     curl \
+    rsync \
     ca-certificates \
     ghostscript \
     netcat-traditional \
