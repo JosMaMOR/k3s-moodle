@@ -262,37 +262,52 @@ ok "[3/9] Servicios disponibles"
 # ============================================================
 log "[4/9] Verificando código Moodle en volumen..."
 
-if [ ! -f /var/www/html/admin/cli/install.php ] && \
-   [ ! -f /var/www/html/public/login/index.php ]; then
+MARKER="/var/www/html/.moodle-code-installed"
+EXPECTED_VERSION="${MOODLE_VERSION:-5.1.3}"
 
-    log "  Volumen vacío — copiando código desde imagen..."
+# Volumen "válido" = existe el marcador Y coincide la versión esperada
+if [ -f "${MARKER}" ] && grep -q "^${EXPECTED_VERSION}$" "${MARKER}" 2>/dev/null; then
+    ok "[4/9] Código verificado — versión: ${EXPECTED_VERSION}"
+else
+    if [ -f "${MARKER}" ]; then
+        warn "  Marcador presente pero versión no coincide — recopiando"
+    else
+        log "  Volumen sin marcador válido — copiando código desde imagen..."
+    fi
 
-    [ ! -d /var/www/html-source ] || \
-    [ ! -f /var/www/html-source/public/login/index.php ] && \
-        die "/var/www/html-source no contiene código Moodle. Rebuild la imagen."
+    # Limpiar antes de re-copiar (importante sobre NFS: evita mezclar restos)
+    find /var/www/html -mindepth 1 -not -name '.moodle-code-installed' -delete
 
     COPY_START=$(date +%s)
-    cp -a /var/www/html-source/. /var/www/html/
+    # rsync es más confiable que cp sobre NFS: verifica tamaños, reintenta,
+    # y --fsync fuerza commit al server antes de retornar.
+    if command -v rsync >/dev/null 2>&1; then
+        rsync -a --delete-after /var/www/html-source/ /var/www/html/
+    else
+        cp -a /var/www/html-source/. /var/www/html/
+    fi
+
+    # Validar que la copia llegó completa antes de dejar el marcador
+    [ -f /var/www/html/public/version.php ] || \
+        die "Copia incompleta: public/version.php ausente tras cp/rsync"
+    [ -f /var/www/html/admin/cli/install.php ] || \
+        die "Copia incompleta: admin/cli/install.php ausente"
+
+    # Forzar flush al servidor NFS antes de escribir el marcador
+    sync
+
+    # Eliminar config.php que pudo venir bakeado en la imagen
+    rm -f /var/www/html/public/config.php
+    rm -f /var/www/html/config.php
+
+    # Marcador atómico AL FINAL — si llegamos aquí, todo cuajó
+    echo "${EXPECTED_VERSION}" > "${MARKER}.tmp"
+    sync
+    mv "${MARKER}.tmp" "${MARKER}"
+
     COPY_SECS=$(( $(date +%s) - COPY_START ))
-
-    # FIX: eliminar config.php que pudo venir bakeado en la imagen.
-    # El cp -a copia TODO html-source incluyendo un posible config.php
-    # de la imagen. Si no lo borramos, la sección 5 lo encuentra y
-    # asume "instalación existente" — el instalador CLI nunca corre.
-    # Un config.php real solo debe existir si fue generado por install.php
-    # en un arranque anterior y persiste en el PVC.
-    rm -f /var/www/html/public/config.php 2>/dev/null || true
-    rm -f /var/www/html/config.php        2>/dev/null || true
-    log "  config.php de imagen eliminado (si existía) — primer arranque limpio"
-
-    ok "[4/9] Código copiado en ${COPY_SECS}s ($(find /var/www/html -type f | wc -l) archivos)"
-else
-    MOODLE_VER=$(grep -oP "(?<=release = ')[^']+" \
-                 /var/www/html/public/version.php 2>/dev/null \
-                 || echo "desconocida")
-    ok "[4/9] Código presente — versión: ${MOODLE_VER}"
+    ok "[4/9] Código copiado y validado en ${COPY_SECS}s"
 fi
-
 # ============================================================
 # 5. INSTALACIÓN O VERIFICACIÓN DE CONFIG.PHP
 # ============================================================

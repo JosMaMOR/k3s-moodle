@@ -140,9 +140,9 @@ if kubectl get namespace longhorn-system >/dev/null 2>&1; then
     # timeout real) y abortaría el script aunque Longhorn esté arrancando bien.
     RETRIES=0
     until kubectl get daemonset/longhorn-manager -n ${LONGHORN_NAMESPACE} >/dev/null 2>&1; do
-      sleep 3
+      sleep 5
       RETRIES=$((RETRIES+1))
-      if [ $RETRIES -ge 20 ]; then
+      if [ $RETRIES -ge 30 ]; then
         echo "  ERROR: el DaemonSet longhorn-manager no apareció en 60s"
         exit 1
       fi
