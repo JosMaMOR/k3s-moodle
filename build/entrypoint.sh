@@ -284,7 +284,7 @@ else
     if command -v rsync >/dev/null 2>&1; then
         rsync -a --delete-after /var/www/html-source/ /var/www/html/
     else
-        cp -a /var/www/html-source/. /var/www/html/
+        cp -r --preserve=mode /var/www/html-source/. /var/www/html/
     fi
 
     # Validar que la copia llegó completa antes de dejar el marcador
