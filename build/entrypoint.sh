@@ -276,13 +276,17 @@ else
     fi
 
     # Limpiar antes de re-copiar (importante sobre NFS: evita mezclar restos)
-    find /var/www/html -mindepth 1 -not -name '.moodle-code-installed' -delete
+    find /var/www/html -mindepth 1 -not -name '.moodle-code-installed' -delete 2>/dev/null || true
 
     COPY_START=$(date +%s)
     # rsync es más confiable que cp sobre NFS: verifica tamaños, reintenta,
     # y --fsync fuerza commit al server antes de retornar.
     if command -v rsync >/dev/null 2>&1; then
-        rsync -a --delete-after /var/www/html-source/ /var/www/html/
+	# -r recursive, -l symlinks, -p perms de archivos, -D devices/specials
+	# NO usar -t (timestamps), -o (owner), -g (group) → todos disparan EPERM
+	# --omit-dir-times: clave para no tocar timestamps de directorios
+	# --no-perms en directorios evita chmod sobre el raíz (otro EPERM potencial)
+        rsync -rlpD --omit-dir-times --no-perms /var/www/html-source/ /var/www/html/
     else
         cp -r --preserve=mode /var/www/html-source/. /var/www/html/
     fi
