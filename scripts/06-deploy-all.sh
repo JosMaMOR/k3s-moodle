@@ -166,7 +166,7 @@ fi
     until kubectl get csidriver driver.longhorn.io >/dev/null 2>&1; do
       sleep 5
       RETRIES=$((RETRIES+1))
-      if [ $RETRIES -ge 80 ]; then
+      if [ $RETRIES -ge 40 ]; then
         echo "  ERROR: el CSI driver de Longhorn no se registró en 240s"
         exit 1
       fi
@@ -1279,9 +1279,9 @@ echo "    kubectl logs -f -l app=moodle -n moodle-prod -c moodle"
 echo ""
 
 # Esperar a que el pod único esté Ready (la readiness probe pase)
-INSTALL_TIMEOUT=1200
+INSTALL_TIMEOUT=600
 ELAPSED=0
-INTERVAL=10
+INTERVAL=5
 echo -n "[*] Esperando pod Ready"
 until kubectl get pods -n moodle-prod -l app=moodle       --no-headers 2>/dev/null | grep -q "1/1.*Running"; do
     sleep $INTERVAL
