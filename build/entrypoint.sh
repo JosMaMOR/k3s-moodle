@@ -315,13 +315,19 @@ fi
 # ============================================================
 # 5. INSTALACIÓN O VERIFICACIÓN DE CONFIG.PHP
 # ============================================================
+# El loader Moodle 5.1 (public/config.php del paquete) NO contiene
+# "$CFG = new stdClass()", solo redirige. El config.php REAL sí lo tiene.
+# Distinguirlos por contenido, no solo por existencia.
+is_real_moodle_config() {
+    [ -f "$1" ] && ! [ -L "$1" ] && \
+        grep -q 'CFG[[:space:]]*=[[:space:]]*new[[:space:]]*stdClass' "$1" 2>/dev/null
+}
+
 CONFIG_FILE=""
-if [ -f /var/www/html/public/config.php ] && \
-   [ ! -L /var/www/html/public/config.php ]; then
-    CONFIG_FILE="/var/www/html/public/config.php"
-elif [ -f /var/www/html/config.php ] && \
-     [ ! -L /var/www/html/config.php ]; then
+if is_real_moodle_config /var/www/html/config.php; then
     CONFIG_FILE="/var/www/html/config.php"
+elif is_real_moodle_config /var/www/html/public/config.php; then
+    CONFIG_FILE="/var/www/html/public/config.php"
 fi
 
 if [ -n "${CONFIG_FILE}" ]; then
