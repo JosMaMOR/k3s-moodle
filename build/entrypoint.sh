@@ -341,7 +341,7 @@ if [ -n "${CONFIG_FILE}" ]; then
        [ ! -f /var/www/html/public/config.php ]; then
         log "  Migrando config.php raíz → public/ (Moodle 5.1)..."
         cp /var/www/html/config.php /var/www/html/public/config.php
-        chmod 640 /var/www/html/public/config.php
+        chmod 640 /var/www/html/public/config.php || true
         ln -sf /var/www/html/public/config.php \
                /var/www/html/config.php 2>/dev/null || true
         CONFIG_FILE="/var/www/html/public/config.php"
@@ -372,9 +372,9 @@ else
     log "  DB:    ${MARIADB_HOST}:${MARIADB_PORT}/${MARIADB_DATABASE}"
     log "  Admin: ${MOODLE_ADMIN_USER}"
 
-    mkdir -p /var/www/moodledata
+    mkdir -p /var/www/moodledata 2>/dev/null || true
     chown moodle:www-data /var/www/moodledata 2>/dev/null || true
-    chmod 2777 /var/www/moodledata
+    chmod 2777 /var/www/moodledata 2>/dev/null || true
 
     # MEJORA v1: en v1 se usaba if [ $? -ne 0 ] después del install.php,
     # lo cual es INCORRECTO con set -e activo. Con set -e, si install.php
@@ -443,7 +443,7 @@ else
     # Asegurar que config.php queda en public/ con symlink en raíz
     if [ "${CONFIG_FILE}" != "/var/www/html/public/config.php" ]; then
         cp "${CONFIG_FILE}" /var/www/html/public/config.php
-        chmod 640 /var/www/html/public/config.php
+        chmod 640 /var/www/html/public/config.php || true
         CONFIG_FILE="/var/www/html/public/config.php"
     fi
 
