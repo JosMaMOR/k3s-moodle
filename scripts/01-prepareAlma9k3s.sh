@@ -66,13 +66,25 @@ NC='\033[0m'
 
 # ── Variables configurables ───────────────────────────────────────────────────
 # Se pueden sobreescribir con variables de entorno antes de ejecutar el script
-K3S_VERSION="${K3S_VERSION:-}"                      # vacío = última versión estable
 MOODLE_IMAGE_TAG="${MOODLE_IMAGE_TAG:-5.1-k3s-raid}"
 MOODLE_IMAGE_NAME="moodle-apache"
 RAID_BASE="${RAID_BASE:-/moodlek3s}"
 MANIFEST_DIR="/root/k3s-moodle/manifests"
 SCRIPTS_DIR="/root/k3s-moodle/scripts"
 NODE_NAME="${NODE_NAME:-k3s-moodle-master}"
+
+# ── Cargar configuración de red del clúster ───────────────────────────────────
+# cluster.env define VIP, IPs de nodos y dominio. Permite override por entorno.
+# ademas de definir version exacta de k3s.
+CLUSTER_ENV="$(dirname "$0")/cluster.env"
+if [ -f "${CLUSTER_ENV}" ]; then
+  source "${CLUSTER_ENV}"
+  log_info "cluster.env cargado: VIP=${CLUSTER_VIP}, nodo=${NODE_A_IP}"
+else
+  log_err "No se encontró ${CLUSTER_ENV} — requerido para configurar la red del clúster."
+  exit 1
+fi
+
 SKIP_FIREWALL="${SKIP_FIREWALL:-false}"
 
 # Requisitos mínimos del sistema
@@ -542,6 +554,11 @@ EOF
     firewall-cmd --permanent --add-port=30000-32767/tcp  # NodePorts
     firewall-cmd --permanent --add-masquerade       # NAT para pods
 
+    # Puertos etcd (HA): 2379 cliente, 2380 peer entre control-planes
+    firewall-cmd --permanent --add-port=2379-2380/tcp
+    # kube-vip usa ARP en la misma L2; VRRP por si luego cambias a modo BGP
+    firewall-cmd --permanent --add-port=10250/tcp   # kubelet metrics (si no está ya)
+
     # Zona de confianza para la interfaz de loopback y red interna de pods
     firewall-cmd --permanent --zone=trusted --add-source=10.42.0.0/16  # pods
     firewall-cmd --permanent --zone=trusted --add-source=10.43.0.0/16  # services
@@ -577,25 +594,41 @@ install_k3s() {
 
   log_sub "Descargando e instalando K3s..."
 
-  # Construir el comando de instalación
-  # INSTALL_K3S_EXEC: flags adicionales para el servidor K3s
-  #   --write-kubeconfig-mode 644: permite leer kubeconfig sin root
-  #   --node-name: nombre explícito del nodo (debe coincidir con nodeSelector)
-  #   --disable traefik: si quisieras usar otro ingress; aquí lo dejamos activo
-  #   --container-runtime-endpoint: usa containerd (default en K3s)
+  # ── Generar config.yaml declarativo (modo HA con etcd) ──────────────────────
+  # En lugar de pasar flags por INSTALL_K3S_EXEC, K3s lee este archivo al
+  # arrancar. Más reproducible y se relee en cada reinicio del servicio.
+  mkdir -p /etc/rancher/k3s
 
-  K3S_INSTALL_FLAGS="--write-kubeconfig-mode 644 --node-name ${NODE_NAME}"
+  log_sub "Generando /etc/rancher/k3s/config.yaml (modo HA con etcd)..."
 
-  if [ -n "${K3S_VERSION}" ]; then
-    log_info "Instalando K3s versión específica: ${K3S_VERSION}"
-    INSTALL_K3S_VERSION="${K3S_VERSION}" \
-    INSTALL_K3S_EXEC="${K3S_INSTALL_FLAGS}" \
-    curl -sfL https://get.k3s.io | sh -
-  else
-    log_info "Instalando última versión estable de K3s..."
-    INSTALL_K3S_EXEC="${K3S_INSTALL_FLAGS}" \
-    curl -sfL https://get.k3s.io | sh -
-  fi
+  # Heredoc SIN comillas en EOF → las variables ${...} SÍ se expanden.
+  cat > /etc/rancher/k3s/config.yaml << EOF
+# Generado por 01-prepareAlma9k3s.sh — regenerar desde cluster.env, no editar a mano
+write-kubeconfig-mode: "644"
+node-name: "${NODE_NAME}"
+node-ip: "${NODE_A_IP}"
+
+# ── HA: etcd embebido ─────────────────────────────────────────────
+# cluster-init activa etcd en lugar de SQLite. Decisión que define el
+# datastore al nacer el clúster; imprescindible para que B y la Pi se
+# unan como control-planes en la Fase 3.
+cluster-init: true
+
+# ── TLS-SAN: la VIP se incluye DESDE YA ───────────────────────────
+# Aunque kube-vip llega en Fase 3, el cert del API server queda válido
+# para la VIP y no hay que regenerarlo después.
+tls-san:
+  - "${NODE_A_IP}"
+  - "${CLUSTER_VIP}"
+  - "${MOODLE_DOMAIN}"
+EOF
+
+  log_ok "config.yaml generado."
+
+  # K3s leerá el config.yaml automáticamente. Ya no se pasan flags por EXEC.
+  log_sub "Instalando K3s ${K3S_VERSION}..."
+  INSTALL_K3S_VERSION="${K3S_VERSION}" \
+  curl -sfL https://get.k3s.io | sh -  
 
   log_ok "K3s instalado: $(k3s --version | head -1)"
 
