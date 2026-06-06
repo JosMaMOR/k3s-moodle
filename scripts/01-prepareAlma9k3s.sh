@@ -64,6 +64,30 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# ── Funciones de utilidad ─────────────────────────────────────────────────────
+log_step()    { echo -e "\n${BLUE}${BOLD}══════════════════════════════════════════════${NC}"; \
+                echo -e "${BLUE}${BOLD}  PASO: $1${NC}"; \
+                echo -e "${BLUE}${BOLD}══════════════════════════════════════════════${NC}"; }
+log_sub()     { echo -e "\n  ${CYAN}${BOLD}▶ $1${NC}"; }
+log_ok()      { echo -e "  ${GREEN}✓${NC} $1"; }
+log_warn()    { echo -e "  ${YELLOW}⚠${NC}  $1"; }
+log_err()     { echo -e "  ${RED}✗ ERROR:${NC} $1"; }
+log_info()    { echo -e "  ${CYAN}ℹ${NC} $1"; }
+
+die() {
+  log_err "$1"
+  echo ""
+  exit 1
+}
+
+require_root() {
+  [ "$EUID" -eq 0 ] || die "Este script debe ejecutarse como root."
+}
+
+check_command() {
+  command -v "$1" &>/dev/null
+}
+
 # ── Variables configurables ───────────────────────────────────────────────────
 # Se pueden sobreescribir con variables de entorno antes de ejecutar el script
 MOODLE_IMAGE_TAG="${MOODLE_IMAGE_TAG:-5.1-k3s-raid}"
@@ -91,30 +115,6 @@ SKIP_FIREWALL="${SKIP_FIREWALL:-false}"
 MIN_RAM_MB=3800      # ~4 GB (dejamos margen)
 MIN_CPU=2
 MIN_DISK_GB=50
-
-# ── Funciones de utilidad ─────────────────────────────────────────────────────
-log_step()    { echo -e "\n${BLUE}${BOLD}══════════════════════════════════════════════${NC}"; \
-                echo -e "${BLUE}${BOLD}  PASO: $1${NC}"; \
-                echo -e "${BLUE}${BOLD}══════════════════════════════════════════════${NC}"; }
-log_sub()     { echo -e "\n  ${CYAN}${BOLD}▶ $1${NC}"; }
-log_ok()      { echo -e "  ${GREEN}✓${NC} $1"; }
-log_warn()    { echo -e "  ${YELLOW}⚠${NC}  $1"; }
-log_err()     { echo -e "  ${RED}✗ ERROR:${NC} $1"; }
-log_info()    { echo -e "  ${CYAN}ℹ${NC} $1"; }
-
-die() {
-  log_err "$1"
-  echo ""
-  exit 1
-}
-
-require_root() {
-  [ "$EUID" -eq 0 ] || die "Este script debe ejecutarse como root."
-}
-
-check_command() {
-  command -v "$1" &>/dev/null
-}
 
 # ── Banner inicial ────────────────────────────────────────────────────────────
 show_banner() {
