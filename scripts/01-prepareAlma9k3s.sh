@@ -76,7 +76,7 @@ NODE_NAME="${NODE_NAME:-k3s-moodle-master}"
 # ── Cargar configuración de red del clúster ───────────────────────────────────
 # cluster.env define VIP, IPs de nodos y dominio. Permite override por entorno.
 # ademas de definir version exacta de k3s.
-CLUSTER_ENV="$(dirname "$0")/cluster.env"
+CLUSTER_ENV="./cluster.env"
 if [ -f "${CLUSTER_ENV}" ]; then
   source "${CLUSTER_ENV}"
   log_info "cluster.env cargado: VIP=${CLUSTER_VIP}, nodo=${NODE_A_IP}"
