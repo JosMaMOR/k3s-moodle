@@ -557,7 +557,7 @@ EOF
     # Puertos etcd (HA): 2379 cliente, 2380 peer entre control-planes
     firewall-cmd --permanent --add-port=2379-2380/tcp
     # kube-vip usa ARP en la misma L2; VRRP por si luego cambias a modo BGP
-    firewall-cmd --permanent --add-port=10250/tcp   # kubelet metrics (si no está ya)
+    firewall-cmd --permanent --add-port=10250/tcp   # kubelet metrics (si no está yaqq)
 
     # Zona de confianza para la interfaz de loopback y red interna de pods
     firewall-cmd --permanent --zone=trusted --add-source=10.42.0.0/16  # pods
