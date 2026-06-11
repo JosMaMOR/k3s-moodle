@@ -160,7 +160,7 @@ if kubectl get namespace longhorn-system >/dev/null 2>&1; then
         -n ${LONGHORN_NAMESPACE} --timeout=600s 2>/dev/null || true
 
     # El rollout status confirma el estado final del DaemonSet. Timeout corto
-    # porque a este punto las imágenes ya bajaron.
+    # porque a este punto las imágenes ya bajaron....
     if ! kubectl rollout status daemonset/longhorn-manager \
          -n ${LONGHORN_NAMESPACE} --timeout=120s; then
       echo ""
