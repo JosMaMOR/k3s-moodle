@@ -68,6 +68,7 @@ NODE_NAME="k3s-moodle-master"
 MANIFEST_DIR="/root/k3s-moodle/manifests"
 # Ruta base en disco RAID donde vivirán los datos
 RAID_BASE="/moodlek3s"
+LONGHORN_NAMESPACE="longhorn-system"
 
 # ── Registry local ────────────────────────────────────────────────────────────
 # FIX v4: imagen con prefijo del registry local — K3s hace pull desde
