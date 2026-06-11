@@ -148,17 +148,30 @@ if kubectl get namespace longhorn-system >/dev/null 2>&1; then
       fi
     done
 
-    # Ahora sí, esperar a que el rollout del DaemonSet termine. Sin 2>/dev/null
-    # para no enmascarar errores reales en la espera.
+    echo "    → Esperando que los pods longhorn-manager bajen imágenes y arranquen..."
+    echo "      (fresh install descarga imágenes; puede tardar 2-5 min)"
+    echo "      Progreso en otra terminal: kubectl get pods -n ${LONGHORN_NAMESPACE} -w"
+
+    # --for=condition=ready espera a que TODOS los contenedores del pod (2/2)
+    # estén listos. Timeout amplio porque la descarga de imágenes en fresh
+    # install es lo que realmente tarda.
+    kubectl wait --for=condition=ready pod \
+        -l app=longhorn-manager \
+        -n ${LONGHORN_NAMESPACE} --timeout=600s 2>/dev/null || true
+
+    # El rollout status confirma el estado final del DaemonSet. Timeout corto
+    # porque a este punto las imágenes ya bajaron.
     if ! kubectl rollout status daemonset/longhorn-manager \
-         -n ${LONGHORN_NAMESPACE} --timeout=300s; then
+         -n ${LONGHORN_NAMESPACE} --timeout=120s; then
       echo ""
       echo "  ╔══════════════════════════════════════════════════════════════╗"
-      echo "  ║  ERROR: Longhorn no quedó listo en 300s                      ║"
+      echo "  ║  ERROR: longhorn-manager no completó el rollout              ║"
       echo "  ║  Revisa: kubectl get pods -n longhorn-system                 ║"
       echo "  ╚══════════════════════════════════════════════════════════════╝"
       exit 1
     fi
+    echo "[*] ✓ longhorn-manager listo."
+    
 fi
 
 echo "[*] Esperando a que los componentes de Longhorn estén listos..."
