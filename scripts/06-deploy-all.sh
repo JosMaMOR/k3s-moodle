@@ -160,18 +160,34 @@ if kubectl get namespace longhorn-system >/dev/null 2>&1; then
       exit 1
     fi
 fi
-    echo "[*] Esperando a que el CSI driver de Longhorn se registre..."
-    # El StorageClass no puede aprovisionar hasta que driver.longhorn.io exista.
-    RETRIES=0
-    until kubectl get csidriver driver.longhorn.io >/dev/null 2>&1; do
-      sleep 5
-      RETRIES=$((RETRIES+1))
-      if [ $RETRIES -ge 40 ]; then
-        echo "  ERROR: el CSI driver de Longhorn no se registró en 240s"
-        exit 1
-      fi
-    done
-    echo "[*] Longhorn instalado y CSI driver registrado."    
+
+echo "[*] Esperando a que los componentes de Longhorn estén listos..."
+echo "    (La primera instalación descarga imágenes; puede tardar 1-5 min)"
+
+# 1) Pods CSI Running — AQUÍ se va el tiempo (descarga de imágenes la 1ra vez)
+echo "    → Esperando pods longhorn-csi-plugin..."
+if kubectl wait --for=condition=ready pod \
+        -l app=longhorn-csi-plugin \
+        -n "${LONGHORN_NAMESPACE}" --timeout=600s 2>/dev/null; then
+    echo "    ✓ Pods CSI listos"
+else
+    echo "    ⚠ Los pods CSI tardaron más de 600s — revisa 'kubectl get pods -n ${LONGHORN_NAMESPACE}'"
+fi
+
+# 2) El driver-deployer es quien registra el csidriver
+echo "    → Esperando longhorn-driver-deployer..."
+kubectl rollout status deployment/longhorn-driver-deployer \
+    -n "${LONGHORN_NAMESPACE}" --timeout=300s 2>/dev/null || true
+
+# 3) Confirmación final del csidriver (a estas alturas ya debe existir casi al instante)
+echo "    → Verificando registro del CSI driver..."
+RETRIES=0
+until kubectl get csidriver driver.longhorn.io >/dev/null 2>&1; do
+    sleep 5
+    RETRIES=$((RETRIES+1))
+    [ $RETRIES -ge 24 ] && { echo "  ERROR: CSI driver no se registró tras esperar componentes"; exit 1; }
+done
+echo "[*] ✓ Longhorn instalado y CSI driver registrado."
 
 # ── CAMBIO LONGHORN: desmarcar el StorageClass default de K3s ──────────────────
 # K3s incluye 'local-path' marcado como StorageClass default. Si se queda como
