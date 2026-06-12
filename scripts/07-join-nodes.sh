@@ -124,7 +124,6 @@ validate_requirements() {
   if [ "${ROOT_DISK_GB}" -lt "${MIN_DISK_GB}" ]; then
     log_warn "Espacio en / puede ser insuficiente: ${ROOT_DISK_GB} GB (recomendado: ${MIN_DISK_GB}+ GB)"
   fi
-fi
 
   # Conectividad a internet
   log_sub "Verificando conectividad..."
