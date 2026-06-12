@@ -121,15 +121,10 @@ validate_requirements() {
   # Verificar tanto / como /moodlek3s si existe el mount point
   ROOT_DISK_GB=$(df -BG / | awk 'NR==2{print $4}' | tr -d 'G')
   log_ok "Espacio disponible en /: ${ROOT_DISK_GB} GB"
-  if [ -d "${RAID_BASE}" ] || mountpoint -q "${RAID_BASE}" 2>/dev/null; then
-    RAID_DISK_GB=$(df -BG "${RAID_BASE}" | awk 'NR==2{print $4}' | tr -d 'G')
-    log_ok "Espacio disponible en ${RAID_BASE}: ${RAID_DISK_GB} GB"
-  else
-    log_info "${RAID_BASE} no montado aún — se creará como directorio local."
-    if [ "${ROOT_DISK_GB}" -lt "${MIN_DISK_GB}" ]; then
-      log_warn "Espacio en / puede ser insuficiente: ${ROOT_DISK_GB} GB (recomendado: ${MIN_DISK_GB}+ GB)"
-    fi
+  if [ "${ROOT_DISK_GB}" -lt "${MIN_DISK_GB}" ]; then
+    log_warn "Espacio en / puede ser insuficiente: ${ROOT_DISK_GB} GB (recomendado: ${MIN_DISK_GB}+ GB)"
   fi
+fi
 
   # Conectividad a internet
   log_sub "Verificando conectividad..."
