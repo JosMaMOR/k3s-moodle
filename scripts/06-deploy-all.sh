@@ -1349,10 +1349,9 @@ if [ "${TABLE_COUNT}" -lt 100 ] 2>/dev/null; then
 fi
 
 # ==========================================
-# 15. FASE 2 — ESCALAR A 3 RÉPLICAS HA + ACTIVAR CRONJOB
+# 15. FASE 2 — ACTIVAR CRONJOB
 # ==========================================
 # Con la instalación completa y config.php presente:
-#   - Los pods adicionales arrancan en modo "instalación existente"
 #   - El CronJob se activa ahora que Moodle está instalado y
 #     config.php existe en el PVC compartido
 echo ""
@@ -1365,20 +1364,8 @@ echo "[*] ✓ CronJob activado — primera ejecución en menos de 1 minuto"
 sleep 15
 
 echo ""
-echo "[*] Fase 2: Ajustando HPA a minReplicas: 3..."
-kubectl patch hpa moodle-hpa -n moodle-prod     --type=merge     -p '{"spec":{"minReplicas":3}}'
-echo "[*] ✓ HPA: minReplicas=3, maxReplicas=10"
-
-echo ""
-echo "[*] Fase 2: Escalando deployment a 3 réplicas HA..."
-kubectl scale deployment moodle -n moodle-prod --replicas=3
-
-echo "[*] Esperando que las 3 réplicas estén disponibles (hasta 300s)..."
-kubectl rollout status deployment/moodle -n moodle-prod --timeout=300s
-
-echo ""
 echo "=========================================="
-echo "DESPLIEGUE COMPLETADO"
+echo "DESPLIEGUE BASICO COMPLETADO"
 echo "=========================================="
 
 echo ""
@@ -1411,27 +1398,9 @@ kubectl get hpa -n moodle-prod
 
 echo ""
 echo "=========================================="
-echo "Próximo paso: ./07-test.sh"
-echo "=========================================="
-echo ""
-echo "=========================================="
-echo "COMANDOS PARA ESCALAR A HA (ejecutar después"
-echo "de verificar que Moodle funciona correctamente)"
-echo "=========================================="
-echo ""
-echo "# 1. Escalar a 4 réplicas de Moodle:"
-echo "kubectl scale deployment moodle -n moodle-prod --replicas=4"
-echo ""
-echo "# 2. Ajustar HPA (mín 4, máx 10):"
-echo "kubectl patch hpa moodle-hpa -n moodle-prod \\"
-echo "  --type=merge \\"
-echo "  -p '{"spec":{"minReplicas":4,"maxReplicas":10}}'"
-echo ""
-echo "# 3. Verificar estado del escalado:"
-echo "kubectl get pods -n moodle-prod -o wide"
-echo "kubectl get hpa -n moodle-prod"
-echo ""
-echo "# 4. Monitorear logs de todos los pods:"
-echo "kubectl logs -f -l app=moodle -n moodle-prod -c moodle --max-log-requests=4"
+echo "Próximo paso: Conectar nodos B y Pi"
+echo "Paso 1: Preparar los nodos con script XXXXXX"
+echo "Paso 2: Ejecutar script XXXX en nodo A para"
+echo "        escalar conexion de nodos a Kube-VIP"
 echo "=========================================="
 echo ""
