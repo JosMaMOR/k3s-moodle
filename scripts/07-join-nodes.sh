@@ -248,14 +248,32 @@ tls-san:
 EOF
 
     if [ "${ARCH}" = "aarch64" ]; then
-	# Raspberry Pi OS no habilita cgroup de memoria por defecto; K3s lo requiere
-	CMDLINE="/boot/firmware/cmdline.txt"
-	[ -f "${CMDLINE}" ] || CMDLINE="/boot/cmdline.txt"   # ubicación varía por versión
-	if ! grep -q "cgroup_memory=1" "${CMDLINE}"; then
-	    sed -i 's/$/ cgroup_memory=1 cgroup_enable=memory/' "${CMDLINE}"
-	    log_warn "cgroups habilitados en ${CMDLINE} — REQUIERE REINICIO antes de unir la Pi"
-	    log_warn "Reinicia la Pi y vuelve a correr el script."
-	    exit 0   # salir limpio; tras reboot se reanuda
+	# En Raspberry Pi (incluido AlmaLinux para Pi), el arranque usa cmdline.txt,
+	# no GRUB. Hay que habilitar el cgroup de memoria que K3s requiere.
+	CMDLINE="/boot/cmdline.txt"
+	[ -f "${CMDLINE}" ] || CMDLINE="/boot/firmware/cmdline.txt"
+
+	NEEDS_REBOOT=0
+	if [ -f "${CMDLINE}" ]; then
+	    cp "${CMDLINE}" "${CMDLINE}.bak"
+	    # Quitar disable si existe
+	    if grep -q "cgroup_disable=memory" "${CMDLINE}"; then
+		sed -i 's/cgroup_disable=memory//' "${CMDLINE}"
+		NEEDS_REBOOT=1
+	    fi
+	    # Añadir enable si falta
+	    if ! grep -q "cgroup_enable=memory" "${CMDLINE}"; then
+		sed -i 's/$/ cgroup_enable=memory cgroup_memory=1/' "${CMDLINE}"
+		NEEDS_REBOOT=1
+	    fi
+	    if [ "${NEEDS_REBOOT}" -eq 1 ]; then
+		log_warn "cgroups de memoria ajustados en ${CMDLINE} — REQUIERE REINICIO."
+		log_warn "Reinicia la Pi y vuelve a correr el script."
+		exit 0
+	    fi
+	    log_ok "cgroups de memoria ya habilitados."
+	else
+	    log_warn "No se encontró cmdline.txt — verifica manualmente los cgroups."
 	fi
     fi
     
