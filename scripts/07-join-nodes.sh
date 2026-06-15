@@ -13,7 +13,15 @@ set -euo pipefail
 MIN_RAM_MB=3600      # ~4 GB (dejamos margen)
 MIN_CPU=2
 MIN_DISK_GB=100
+RAID_BASE="${RAID_BASE:-/moodlek3s}"
 ARCH=$(uname -m)   # x86_64 o aarch64
+NODE_NAME="node-b-k3s-moodle"
+MANIFEST_DIR="/root/k3s-moodle/manifests"
+SCRIPTS_DIR="/root/k3s-moodle/scripts"
+
+if [ "${ARCH}" = "aarch64" ]; then
+    NODE_NAME="raspberry-k3s-moodle"
+fi
 
 # ── Colores para output ───────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -153,10 +161,72 @@ update_system() {
   log_ok "Sistema actualizado."
 }
 
+prepare_storage() {
+  log_step "Preparando almacenamiento en ${RAID_BASE}"
+
+  # Crear el directorio base si no existe
+  # Si /moodlek3s es un punto de montaje de RAID, los directorios se crean dentro.
+  # Si es un directorio local (lab/pruebas), también funciona.
+  if ! mountpoint -q "${RAID_BASE}" 2>/dev/null; then
+    log_warn "${RAID_BASE} no es un punto de montaje — usando directorio local."
+    log_info "Para producción, monta tu RAID en ${RAID_BASE} antes de ejecutar este script."
+  else
+    log_ok "${RAID_BASE} es un punto de montaje activo."
+    RAID_INFO=$(df -h "${RAID_BASE}" | awk 'NR==2')
+    log_info "Info del RAID: ${RAID_INFO}"
+  fi
+
+  # Crear estructura de directorios
+  log_sub "Creando estructura de directorios..."
+  mkdir -p "${RAID_BASE}/mariadb"
+  mkdir -p "${RAID_BASE}/redis"
+  log_ok "Directorios creados en ${RAID_BASE}/"
+
+  # Permisos — deben coincidir con los UIDs de los contenedores:
+  #   uid 999 → mariadb:lts (usuario mysql dentro del contenedor)
+  #   uid 999 → redis:7-alpine (usuario redis dentro del contenedor)
+  #   uid 1001 → moodle-apache (usuario www-data dentro del contenedor)
+  log_sub "Configurando permisos..."
+  chown -R 999:999   "${RAID_BASE}/mariadb"
+  chmod -R 750       "${RAID_BASE}/mariadb"
+
+  chown -R 999:999   "${RAID_BASE}/redis"
+  chmod -R 750       "${RAID_BASE}/redis"
+
+  log_ok "Permisos configurados."
+  ls -la "${RAID_BASE}/"
+
+  # Crear directorios de trabajo del proyecto
+  log_sub "Creando directorios del proyecto..."
+  mkdir -p "${MANIFEST_DIR}"
+  mkdir -p "${SCRIPTS_DIR}"
+  log_ok "Directorios del proyecto creados en /root/k3s-moodle/"
+}
+
 # ============================================================================
 # PASO 4: PREPARACIÓN DEL SISTEMA PARA UNIRSE A LOS NODOS
 # ============================================================================
 prepare_node() {
+
+    # ── Set Hostname ────────────────────────────────────────────────────────────────
+  log_sub "Configurando hostname..."
+  CURRENT_HOSTNAME=$(hostname)
+  if [ "${CURRENT_HOSTNAME}" != "${NODE_NAME}" ]; then
+    hostnamectl set-hostname "${NODE_NAME}"
+    log_ok "Hostname configurado: ${NODE_NAME}"
+    log_info "Era: ${CURRENT_HOSTNAME} → Ahora: ${NODE_NAME}"
+    log_info "Reinicio manual necesario para aplicar cambios en el hostname."
+    exit 0
+  else
+    log_ok "Hostname ya es correcto: ${NODE_NAME}"
+  fi
+
+  # Asegurar que el hostname resuelve localmente
+  if ! grep -q "${NODE_NAME}" /etc/hosts; then
+    echo "127.0.0.1  ${NODE_NAME}" >> /etc/hosts
+    log_ok "Hostname añadido a /etc/hosts."
+  fi
+    
   # ── 4.1: Deshabilitar Swap ──────────────────────────────────────────────────
   log_sub "Deshabilitando swap..."
   # Kubernetes requiere que swap esté deshabilitado. Con swap activo,
@@ -290,6 +360,7 @@ main(){
     show_banner
     validate_requirements
     update_system
+    prepare_storage
     prepare_node
     node_join
 }
