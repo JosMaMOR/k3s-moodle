@@ -19,8 +19,18 @@ NODE_NAME="node-b-k3s-moodle"
 MANIFEST_DIR="/root/k3s-moodle/manifests"
 SCRIPTS_DIR="/root/k3s-moodle/scripts"
 
+# STORAGE_NODE: indica si este nodo forma parte del PLANO DE DATOS
+#   (réplicas de Longhorn y/o nodo de datos de Galera).
+#     true  → servidores físicos A y B (x86_64): guardan datos.
+#     false → Raspberry Pi (aarch64): árbitro puro (etcd + garbd), SIN datos.
+#   La Pi se EXCLUYE de Longhorn: la supervivencia del dato la dan las réplicas
+#   en A y B, no el longhorn-manager. Por eso la Pi no necesita iscsi/nfs, ni
+#   módulos iSCSI, ni discos de BD — y libera CPU para garbd/Galera/MaxScale.
+STORAGE_NODE=true
+
 if [ "${ARCH}" = "aarch64" ]; then
     NODE_NAME="raspberry-k3s-moodle"
+    STORAGE_NODE=false
 fi
 
 # ── Colores para output ───────────────────────────────────────────────────────
@@ -82,6 +92,7 @@ show_banner() {
   echo -e "  IP:      $(hostname -I | awk '{print $1}')"
   echo -e "  SO:      $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '"')"
   echo -e "  Kernel:  $(uname -r)"
+  echo -e "  Rol:     STORAGE_NODE=${STORAGE_NODE} (true=plano de datos / false=árbitro)"
   echo ""
 }
 
@@ -164,49 +175,79 @@ update_system() {
 prepare_storage() {
   log_step "Preparando almacenamiento en ${RAID_BASE}"
 
-  # Crear el directorio base si no existe
-  # Si /moodlek3s es un punto de montaje de RAID, los directorios se crean dentro.
-  # Si es un directorio local (lab/pruebas), también funciona.
-  if ! mountpoint -q "${RAID_BASE}" 2>/dev/null; then
-    log_warn "${RAID_BASE} no es un punto de montaje — usando directorio local."
-    log_info "Para producción, monta tu RAID en ${RAID_BASE} antes de ejecutar este script."
+  # Las carpetas de datos locales (MariaDB/Redis) y la preparación del disco
+  # SOLO aplican a nodos del plano de datos. La Pi (árbitro) no guarda datos.
+  if [ "${STORAGE_NODE}" = "true" ]; then
+    # Crear el directorio base si no existe
+    # Si /moodlek3s es un punto de montaje de RAID, los directorios se crean dentro.
+    # Si es un directorio local (lab/pruebas), también funciona.
+    if ! mountpoint -q "${RAID_BASE}" 2>/dev/null; then
+      log_warn "${RAID_BASE} no es un punto de montaje — usando directorio local."
+      log_info "Para producción, monta tu RAID en ${RAID_BASE} antes de ejecutar este script."
+    else
+      log_ok "${RAID_BASE} es un punto de montaje activo."
+      RAID_INFO=$(df -h "${RAID_BASE}" | awk 'NR==2')
+      log_info "Info del RAID: ${RAID_INFO}"
+    fi
+
+    # Crear estructura de directorios
+    log_sub "Creando estructura de directorios..."
+    mkdir -p "${RAID_BASE}/mariadb"
+    mkdir -p "${RAID_BASE}/redis"
+    log_ok "Directorios creados en ${RAID_BASE}/"
+
+    # Permisos — deben coincidir con los UIDs de los contenedores:
+    #   uid 999 → mariadb:lts (usuario mysql dentro del contenedor)
+    #   uid 999 → redis:7-alpine (usuario redis dentro del contenedor)
+    #   uid 1001 → moodle-apache (usuario www-data dentro del contenedor)
+    log_sub "Configurando permisos..."
+    chown -R 999:999   "${RAID_BASE}/mariadb"
+    chmod -R 750       "${RAID_BASE}/mariadb"
+
+    chown -R 999:999   "${RAID_BASE}/redis"
+    chmod -R 750       "${RAID_BASE}/redis"
+
+    log_ok "Permisos configurados."
+    ls -la "${RAID_BASE}/"
   else
-    log_ok "${RAID_BASE} es un punto de montaje activo."
-    RAID_INFO=$(df -h "${RAID_BASE}" | awk 'NR==2')
-    log_info "Info del RAID: ${RAID_INFO}"
+    log_info "Nodo árbitro (${NODE_NAME}): se omiten carpetas de datos locales."
+    log_info "garbd no almacena datos — solo vota en el quórum de Galera."
   fi
-
-  # Crear estructura de directorios
-  log_sub "Creando estructura de directorios..."
-  mkdir -p "${RAID_BASE}/mariadb"
-  mkdir -p "${RAID_BASE}/redis"
-  log_ok "Directorios creados en ${RAID_BASE}/"
-
-  # Permisos — deben coincidir con los UIDs de los contenedores:
-  #   uid 999 → mariadb:lts (usuario mysql dentro del contenedor)
-  #   uid 999 → redis:7-alpine (usuario redis dentro del contenedor)
-  #   uid 1001 → moodle-apache (usuario www-data dentro del contenedor)
-  log_sub "Configurando permisos..."
-  chown -R 999:999   "${RAID_BASE}/mariadb"
-  chmod -R 750       "${RAID_BASE}/mariadb"
-
-  chown -R 999:999   "${RAID_BASE}/redis"
-  chmod -R 750       "${RAID_BASE}/redis"
-
-  log_ok "Permisos configurados."
-  ls -la "${RAID_BASE}/"
-
-  # Crear directorios de trabajo del proyecto
-  log_sub "Creando directorios del proyecto..."
-  mkdir -p "${MANIFEST_DIR}"
-  mkdir -p "${SCRIPTS_DIR}"
-  log_ok "Directorios del proyecto creados en /root/k3s-moodle/"
 }
 
 # ============================================================================
 # PASO 4: PREPARACIÓN DEL SISTEMA PARA UNIRSE A LOS NODOS
 # ============================================================================
 prepare_node() {
+
+  # ── Dependencias de Longhorn — SOLO en nodos de almacenamiento ──────────────
+  # La Pi se excluye de Longhorn, así que no necesita iscsi/nfs ni sus módulos.
+  if [ "${STORAGE_NODE}" = "true" ]; then
+    log_sub "Instalando dependencias de Longhorn..."
+    # iscsi-initiator-utils: daemon y cliente iSCSI. Longhorn monta sus volúmenes
+    #   de bloque vía iSCSI en cada nodo worker. Sin esto los PVCs no pueden montarse.
+    # nfs-utils: cliente NFS requerido para volúmenes RWX (ReadWriteMany).
+    #   Longhorn implementa RWX internamente con NFS. Moodle lo necesita para que
+    #   múltiples pods lean y escriban el mismo volumen simultáneamente.
+    # cryptsetup: herramienta de cifrado LUKS/dm-crypt. El instalador de Longhorn
+    #   la requiere aunque no uses cifrado activamente en los volúmenes.
+    # device-mapper: framework del kernel para volúmenes lógicos y mapeo de
+    #   dispositivos. Generalmente ya viene en AlmaLinux 9, pero lo aseguramos.
+    # util-linux: provee blkid, lsblk, findmnt — comandos que Longhorn Manager
+    #   ejecuta para inspeccionar discos y puntos de montaje del nodo.
+    dnf install -y \
+      iscsi-initiator-utils \
+      nfs-utils \
+      cryptsetup \
+      device-mapper \
+      util-linux \
+      2>&1 | tail -5
+    log_ok "Dependencias de Longhorn instaladas."
+  else
+    log_sub "Nodo árbitro (${NODE_NAME}): se OMITEN dependencias de Longhorn"
+    log_info "La Pi se excluye de Longhorn (iscsi/nfs no necesarios)."
+    log_info "Los datos siguen vivos por las réplicas en A y B; la Pi aporta el voto etcd."
+  fi
 
     # ── Set Hostname ────────────────────────────────────────────────────────────────
   log_sub "Configurando hostname..."
@@ -226,7 +267,7 @@ prepare_node() {
     echo "127.0.0.1  ${NODE_NAME}" >> /etc/hosts
     log_ok "Hostname añadido a /etc/hosts."
   fi
-    
+
   # ── 4.1: Deshabilitar Swap ──────────────────────────────────────────────────
   log_sub "Deshabilitando swap..."
   # Kubernetes requiere que swap esté deshabilitado. Con swap activo,
@@ -240,6 +281,115 @@ prepare_node() {
   else
     log_warn "Swap todavía activo — revisa /etc/fstab manualmente."
   fi
+
+  # ── 4.2b: Módulos requeridos por Longhorn — SOLO en nodos de almacenamiento ─
+  # La Pi no corre Longhorn, así que no necesita estos módulos ni iscsid.
+  if [ "${STORAGE_NODE}" = "true" ]; then
+    # iscsi_tcp: implementa iSCSI sobre TCP en el kernel.
+    #   Longhorn monta cada volumen de bloque en los nodos vía iSCSI.
+    #   Sin este módulo, los pods que pidan un PVC de Longhorn no pueden arrancar.
+    # dm_crypt: cifrado de dispositivos de bloque.
+    #   Lo requiere cryptsetup y el propio Longhorn para encriptación de volúmenes.
+    cat >> /etc/modules-load.d/k3s.conf << 'EOF'
+# Módulos requeridos por Longhorn
+# iscsi_tcp: iSCSI sobre TCP para montaje de volúmenes de bloque
+# dm_crypt:  cifrado de dispositivos de bloque
+iscsi_tcp
+dm_crypt
+EOF
+
+    modprobe iscsi_tcp 2>/dev/null && log_ok "Módulo iscsi_tcp cargado." || log_warn "iscsi_tcp no se pudo cargar — puede estar integrado en el kernel."
+    modprobe dm_crypt  2>/dev/null && log_ok "Módulo dm_crypt cargado."  || log_warn "dm_crypt no se pudo cargar — puede estar integrado en el kernel."
+
+    # iscsid: daemon que gestiona las sesiones iSCSI activas en el nodo.
+    # Debe estar corriendo antes de que Longhorn intente montar cualquier volumen.
+    systemctl enable --now iscsid 2>/dev/null \
+      && log_ok "iscsid habilitado y activo." \
+      || log_warn "iscsid no se pudo iniciar — verifica con: systemctl status iscsid"
+  else
+    log_info "Nodo árbitro: se omiten módulos iSCSI (iscsi_tcp/dm_crypt) e iscsid."
+  fi
+
+  # ── 4.3: Parámetros sysctl para Kubernetes ──────────────────────────────────
+  log_sub "Configurando parámetros del kernel (sysctl)..."
+  cat > /etc/sysctl.d/99-k3s.conf << 'EOF'
+# ── Parámetros del kernel para K3s / Kubernetes ──────────────────────────────
+#
+# net.bridge.bridge-nf-call-iptables = 1
+#   Los puentes de red envían tráfico a iptables para inspección.
+#   Necesario para las políticas de red de Kubernetes (NetworkPolicy).
+#
+# net.bridge.bridge-nf-call-ip6tables = 1
+#   Lo mismo para IPv6 (necesario aunque no uses IPv6, evita warnings).
+#
+# net.ipv4.ip_forward = 1
+#   Habilita el reenvío de paquetes IP entre interfaces.
+#   Necesario para que los pods puedan comunicarse con el exterior.
+#
+# fs.inotify.max_user_watches = 524288
+#   Máximo de archivos que inotify puede monitorear por usuario.
+#   K3s y los pods usan inotify para detectar cambios en ConfigMaps/Secrets.
+#
+# fs.inotify.max_user_instances = 512
+#   Máximo de instancias inotify por usuario.
+#
+# vm.max_map_count = 262144
+#   Máximo de áreas de memoria mapeadas por proceso.
+#   Requerido por Elasticsearch y algunas aplicaciones Java; Moodle no lo
+#   necesita estrictamente pero evita warnings en el sistema.
+#
+# kernel.panic = 10
+#   Reinicia automáticamente el sistema 10 segundos después de un kernel panic.
+#   Importante en producción para recuperación automática.
+#
+# kernel.panic_on_oops = 1
+#   Genera kernel panic ante errores graves del kernel (oops).
+
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+net.ipv6.conf.all.forwarding        = 1
+fs.inotify.max_user_watches         = 524288
+fs.inotify.max_user_instances       = 512
+fs.file-max                         = 1048576
+vm.max_map_count                    = 262144
+kernel.panic                        = 10
+kernel.panic_on_oops                = 1
+EOF
+
+  sysctl --system 2>&1 | grep -E "Applying|net\.|fs\.|vm\.|kernel\." | tail -15
+  log_ok "Parámetros sysctl aplicados."
+
+  # ── 4.4: Límites del sistema (ulimits) ──────────────────────────────────────
+  log_sub "Configurando límites del sistema..."
+  # K3s y los pods de Moodle/MariaDB necesitan muchos archivos abiertos
+  # simultáneamente. Los límites por defecto de AlmaLinux son demasiado bajos.
+  cat > /etc/security/limits.d/99-k3s.conf << 'EOF'
+# Límites del sistema para K3s / contenedores
+# Formato: <dominio> <tipo> <ítem> <valor>
+#   *     = aplica a todos los usuarios
+#   soft  = límite suave (advertencia, puede aumentarse hasta hard)
+#   hard  = límite duro (máximo absoluto)
+#   nofile = número máximo de archivos abiertos por proceso
+#   nproc  = número máximo de procesos por usuario
+#   memlock = memoria bloqueada en RAM (bytes), unlimited para EBPF de K3s
+
+*         soft    nofile    1048576
+*         hard    nofile    1048576
+*         soft    nproc     65536
+*         hard    nproc     65536
+root      soft    nofile    1048576
+root      hard    nofile    1048576
+root      soft    nproc     unlimited
+root      hard    nproc     unlimited
+*         soft    memlock   unlimited
+*         hard    memlock   unlimited
+EOF
+  log_ok "Límites del sistema configurados."
+
+  # Aplicar límites a la sesión actual
+  ulimit -n 1048576 2>/dev/null || true
+
 
   # ── 4.5: SELinux en modo permisivo ──────────────────────────────────────────
   log_sub "Configurando SELinux..."
@@ -287,16 +437,23 @@ prepare_node() {
     firewall-cmd --permanent --zone=trusted --add-source=10.43.0.0/16  # services
     firewall-cmd --permanent --zone=trusted --add-interface=lo
 
-    # Puertos de Longhorn (comunicación entre nodos del clúster)
+    # Puertos de Longhorn — SOLO en nodos de almacenamiento (la Pi no sirve Longhorn)
     # 9500-9503/tcp: Longhorn Manager (API interna) + Engine (por volumen)
     # 2049/tcp:      NFS — Longhorn lo usa internamente para volúmenes RWX
     # 111/tcp:       RPC portmapper, requerido por NFS
     # 20048/tcp:     mountd de NFS
-    firewall-cmd --permanent --add-port=9500-9503/tcp  # Longhorn Manager + Engine
-    firewall-cmd --permanent --add-port=2049/tcp        # NFS (RWX)
-    firewall-cmd --permanent --add-port=111/tcp         # RPC portmapper
-    firewall-cmd --permanent --add-port=20048/tcp       # NFS mountd
-    
+    # NOTA: verifica el rango de puertos del instance-manager para TU versión de
+    #       Longhorn — varía entre versiones y, si se queda corto, la réplica
+    #       entre A y B podría fallar (que es justo tu HA de almacenamiento).
+    if [ "${STORAGE_NODE}" = "true" ]; then
+      firewall-cmd --permanent --add-port=9500-9503/tcp  # Longhorn Manager + Engine
+      firewall-cmd --permanent --add-port=2049/tcp        # NFS (RWX)
+      firewall-cmd --permanent --add-port=111/tcp         # RPC portmapper
+      firewall-cmd --permanent --add-port=20048/tcp       # NFS mountd
+    else
+      log_info "Nodo árbitro: se omiten los puertos de Longhorn/NFS en el firewall."
+    fi
+
     firewall-cmd --reload
     log_ok "Firewall configurado con puertos de K3s, Moodle y Longhorn."
   else
@@ -346,14 +503,39 @@ EOF
 	    log_warn "No se encontró cmdline.txt — verifica manualmente los cgroups."
 	fi
     fi
-    
+
     # Inicializa la conexion como control-pane
   curl -sfL https://get.k3s.io | \
     INSTALL_K3S_VERSION="${K3S_VERSION}" \
   sh -s - server
 }
 
+# ── Registrar el nodo como nodo de almacenamiento Longhorn ────────────────────
+# Solo nodos STORAGE (A/B). La Pi (STORAGE_NODE=false) se salta esto entero →
+# sin label = el manager nunca se le programa = árbitro limpio.
+register_longhorn_node() {
+  [ "${STORAGE_NODE}" = "true" ] || { log_info "Árbitro: no se registra en Longhorn."; return 0; }
 
+  export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+  log_sub "Esperando a que ${NODE_NAME} aparezca en el clúster..."
+  local n=0
+  until kubectl get node "${NODE_NAME}" >/dev/null 2>&1; do
+    sleep 5; n=$((n+1))
+    [ $n -ge 24 ] && die "El nodo ${NODE_NAME} no se registró en 120s."
+  done
+
+  # ORDEN IMPORTANTE: el disco y el tag van ANTES que la label.
+  # La label dispara la programación del manager → al registrar el nodo, Longhorn
+  # lee la anotación de disco. Si la label fuera primero, el manager registraría
+  # el nodo SIN la config de disco (la anotación solo se lee en el 1er registro).
+  log_sub "Registrando ${NODE_NAME} como nodo de almacenamiento Longhorn..."
+  kubectl annotate node "${NODE_NAME}" \
+    node.longhorn.io/default-disks-config='[{"path":"/moodlek3s/longhorn","allowScheduling":true,"storageReserved":0,"tags":["storage"]}]' --overwrite
+  kubectl annotate node "${NODE_NAME}" \
+    node.longhorn.io/default-node-tags='["storage"]' --overwrite
+  kubectl label node "${NODE_NAME}" tesoem.edu.mx/longhorn-node=true --overwrite
+  log_ok "${NODE_NAME} listo: el manager y las réplicas ya pueden programarse aquí."
+}
 
 main(){
     require_root
@@ -363,6 +545,7 @@ main(){
     prepare_storage
     prepare_node
     node_join
+    register_longhorn_node
 }
 
 main "$@"

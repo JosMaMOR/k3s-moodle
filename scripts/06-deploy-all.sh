@@ -131,7 +131,62 @@ if kubectl get namespace longhorn-system >/dev/null 2>&1; then
 
     kubectl annotate node ${NODE_NAME} node.longhorn.io/default-disks-config='[{"path":"/moodlek3s/longhorn","allowScheduling":true,"storageReserved":0,"tags":["storage"]}]' --overwrite
     
-    kubectl apply -f https://raw.githubusercontent.com/longhorn/longhorn/v1.11.2/deploy/longhorn.yaml
+# ── Longhorn vía Kustomize: manager solo en nodos de almacenamiento ────────
+    # Vendorizamos el manifiesto upstream (pin v1.11.2) y le superponemos parches
+    # mínimos: nodeSelector del DaemonSet del manager + setting que rige a los
+    # componentes gestionados por Longhorn (instance-manager, CSI, share-manager).
+    # Ambos apuntan a la label tesoem.edu.mx/longhorn-node=true → sin esa label,
+    # ningún componente de Longhorn se programa (la Pi nunca la recibe).
+    LH_DIR="${MANIFEST_DIR}/longhorn"
+    mkdir -p "${LH_DIR}"
+
+    curl -sfL https://raw.githubusercontent.com/longhorn/longhorn/v1.11.2/deploy/longhorn.yaml \
+      -o "${LH_DIR}/base.yaml" || { echo "ERROR: no se pudo descargar longhorn.yaml"; exit 1; }
+
+    cat > "${LH_DIR}/patch-manager-nodeselector.yaml" <<'EOF'
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: longhorn-manager
+  namespace: longhorn-system
+spec:
+  template:
+    spec:
+      nodeSelector:
+        tesoem.edu.mx/longhorn-node: "true"
+EOF
+
+    # El ConfigMap guarda los settings como UN string; el merge reemplaza el
+    # valor completo, así que reproducimos los 2 defaults de v1.11.2 + el nuestro.
+    cat > "${LH_DIR}/patch-system-managed-nodeselector.yaml" <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: longhorn-default-setting
+  namespace: longhorn-system
+data:
+  default-setting.yaml: |-
+    priority-class: "longhorn-critical"
+    disable-revision-counter: "{\"v1\":\"true\"}"
+    system-managed-components-node-selector: "tesoem.edu.mx/longhorn-node:true"
+EOF
+
+    cat > "${LH_DIR}/kustomization.yaml" <<'EOF'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - base.yaml
+patches:
+  - path: patch-manager-nodeselector.yaml
+  - path: patch-system-managed-nodeselector.yaml
+EOF
+
+    # CRÍTICO: la label en A va ANTES del apply. Si el manager tiene nodeSelector
+    # y ningún nodo la tiene, el DaemonSet queda en desired=0 y el rollout
+    # "pasaría" con cero pods → Longhorn no arrancaría.
+    kubectl label node ${NODE_NAME} tesoem.edu.mx/longhorn-node=true --overwrite
+
+    kubectl apply -k "${LH_DIR}/"
 
     echo "[*] Esperando a que el longhorn-manager este listo (hasta 300s)..."
 
