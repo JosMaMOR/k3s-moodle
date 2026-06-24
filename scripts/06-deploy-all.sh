@@ -380,7 +380,7 @@ reclaimPolicy: Retain
 volumeBindingMode: Immediate
 parameters:
   # numberOfReplicas viene de la variable LONGHORN_REPLICAS (1 en un nodo).
-  numberOfReplicas: "1"
+  numberOfReplicas: "2"
   staleReplicaTimeout: "30"
   fsType: "ext4"
   # nodeSelector: solo nodos con el tag "storage" reciben réplicas.
@@ -1452,10 +1452,10 @@ echo "=== HPA ==="
 kubectl get hpa -n moodle-prod
 
 echo ""
-echo "=========================================="
+echo "========================================================="
 echo "Próximo paso: Conectar nodos B y Pi"
-echo "Paso 1: Preparar los nodos con script XXXXXX"
-echo "Paso 2: Ejecutar script XXXX en nodo A para"
+echo "Paso 1: Preparar los nodos con script 07-join-nodes.sh"
+echo "Paso 2: Ejecutar script 08-form-HA-cluster en nodo A para"
 echo "        escalar conexion de nodos a Kube-VIP"
-echo "=========================================="
+echo "========================================================="
 echo ""

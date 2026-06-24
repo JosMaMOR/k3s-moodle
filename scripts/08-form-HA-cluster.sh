@@ -14,6 +14,12 @@ RAID_BASE="${RAID_BASE:-/moodlek3s}"
 ARCH=$(uname -m)   # x86_64 o aarch64
 MANIFEST_DIR="/root/k3s-moodle/manifests"
 SCRIPTS_DIR="/root/k3s-moodle/scripts"
+# ── Config de la app (ajusta si cambian nombres) ──────────────────────────────
+MOODLE_NS="moodle-prod"
+MOODLE_PVCS="moodle-html-pvc moodle-data-pvc"
+MOODLE_DEPLOY="moodle"
+MOODLE_HPA="moodle-hpa"
+MOODLE_TARGET_REPLICAS=3
 
 # ── Colores para output ───────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -227,6 +233,122 @@ verify_kube_vip() {
   done
 }
 
+# ── 2. Asegurar HA de almacenamiento: cada volumen con 2 réplicas en A y B ─────
+# Con el SC ya en 2, los volúmenes nacen queriendo 2 y Longhorn los sana al unir
+# B. Aquí (a) reforzamos el deseo en cada volumen por idempotencia —no-op si ya
+# es 2— y (b) ESPERAMOS la convergencia: robustness=healthy y réplicas en 2 nodos.
+ensure_longhorn_ha() {
+  log_sub "Asegurando 2 réplicas por volumen, distribuidas en A y B"
+  local pvc vol robustness rep_nodes timeout=300 interval=10 elapsed
+
+  for pvc in ${MOODLE_PVCS}; do
+    vol=$(kubectl -n "${MOODLE_NS}" get pvc "${pvc}" -o jsonpath='{.spec.volumeName}' 2>/dev/null)
+    [ -n "${vol}" ] || die "No se pudo resolver el volumen del PVC ${pvc}."
+    log_info "PVC ${pvc} → volumen ${vol}"
+
+    # (a) Red de seguridad idempotente: fija numberOfReplicas=2 (no-op si ya está)
+    kubectl -n longhorn-system patch volumes.longhorn.io "${vol}" \
+      --type=merge -p '{"spec":{"numberOfReplicas":2}}' >/dev/null \
+      || die "No se pudo fijar numberOfReplicas=2 en ${vol}."
+
+    # (b) Esperar convergencia a healthy con réplicas en 2 nodos distintos
+    elapsed=0
+    while true; do
+      robustness=$(kubectl -n longhorn-system get volumes.longhorn.io "${vol}" \
+        -o jsonpath='{.status.robustness}' 2>/dev/null)
+      rep_nodes=$(kubectl -n longhorn-system get replicas.longhorn.io \
+        -l longhornvolume="${vol}" -o jsonpath='{range .items[*]}{.spec.nodeID}{"\n"}{end}' 2>/dev/null \
+        | sort -u | grep -c .)
+
+      if [ "${robustness}" = "healthy" ] && [ "${rep_nodes}" -eq 2 ]; then
+        log_ok "${vol}: healthy, réplicas en ${rep_nodes} nodos (A y B)."
+        break
+      fi
+      if [ "${elapsed}" -ge "${timeout}" ]; then
+        die "${vol} no convergió a HA en ${timeout}s (robustness=${robustness:-?}, nodos=${rep_nodes}). Revisa: kubectl -n longhorn-system get volumes.longhorn.io ${vol}"
+      fi
+      log_info "Esperando reconstrucción de ${vol}... (robustness=${robustness:-—}, nodos=${rep_nodes}/2) [${elapsed}s/${timeout}s]"
+      sleep "${interval}"; elapsed=$((elapsed + interval))
+    done
+  done
+  log_ok "Almacenamiento en HA: todos los volúmenes con réplica en A y B."
+}
+
+# ── 3. Escalar Moodle a HA (HPA + réplicas) ───────────────────────────────────
+# El orden importa: esto va DESPUÉS de ensure_longhorn_ha, porque los 3 pods de
+# Moodle cuelgan del volumen RWX, que debe estar servido en HA antes de escalar.
+scale_moodle() {
+  log_sub "Escalando Moodle a ${MOODLE_TARGET_REPLICAS} réplicas (HA)"
+
+  # El HPA ya existe (lo crea el 06 con minReplicas:1). Subimos el piso a 3.
+  kubectl patch hpa "${MOODLE_HPA}" -n "${MOODLE_NS}" \
+    --type=merge -p "{\"spec\":{\"minReplicas\":${MOODLE_TARGET_REPLICAS}}}" \
+    || die "No se pudo patchear el HPA ${MOODLE_HPA}."
+  log_ok "HPA: minReplicas=${MOODLE_TARGET_REPLICAS} (maxReplicas se respeta del manifiesto)."
+
+  # scale da el arranque inmediato a 3; el HPA lo sostiene a partir de ahí.
+  kubectl scale deployment "${MOODLE_DEPLOY}" -n "${MOODLE_NS}" \
+    --replicas=${MOODLE_TARGET_REPLICAS} || die "Falló el scale del deployment."
+
+  log_info "Esperando rollout de las ${MOODLE_TARGET_REPLICAS} réplicas (hasta 300s)..."
+  kubectl rollout status deployment/"${MOODLE_DEPLOY}" -n "${MOODLE_NS}" --timeout=300s \
+    || die "El rollout de Moodle no completó."
+
+  # Verificación: 3 pods Running y en qué nodos cayeron (el podAntiAffinity
+  # preferred reparte; con 2 nodos y 3 réplicas, una se dobla — es esperado).
+  local running
+  running=$(kubectl -n "${MOODLE_NS}" get pods -l app=moodle --no-headers 2>/dev/null \
+    | awk '$3=="Running"{c++} END{print c+0}')
+  [ "${running}" -eq "${MOODLE_TARGET_REPLICAS}" ] \
+    || die "Se esperaban ${MOODLE_TARGET_REPLICAS} pods Running, hay ${running}."
+  log_ok "${running} pods de Moodle Running. Distribución:"
+  kubectl -n "${MOODLE_NS}" get pods -l app=moodle -o wide --no-headers | awk '{print "      "$1" → "$7}'
+}
+
+# ── Resumen final de HA: dónde quedó cada réplica y cada pod ───────────────────
+# Solo lectura. Imprime, al cierre del script, la distribución real por nodo para
+# que el output deje evidencia visible de que el almacenamiento y la app quedaron
+# repartidos en A y B (y nada en la Pi).
+show_ha_summary() {
+  echo ""
+  echo -e "${BLUE}${BOLD}══════════════════════════════════════════════════════════${NC}"
+  echo -e "${BLUE}${BOLD}  RESUMEN DE ALTA DISPONIBILIDAD — DISTRIBUCIÓN POR NODO${NC}"
+  echo -e "${BLUE}${BOLD}══════════════════════════════════════════════════════════${NC}"
+
+  # 1. Réplicas de almacenamiento (Longhorn): una por nodo, por volumen
+  log_sub "Réplicas de almacenamiento (Longhorn)"
+  local pvc vol
+  for pvc in ${MOODLE_PVCS}; do
+    vol=$(kubectl -n "${MOODLE_NS}" get pvc "${pvc}" -o jsonpath='{.spec.volumeName}' 2>/dev/null)
+    echo -e "  ${CYAN}${BOLD}${pvc}${NC}  (${vol})"
+    kubectl -n longhorn-system get replicas.longhorn.io -l longhornvolume="${vol}" \
+      -o custom-columns='  RÉPLICA:.metadata.name,NODO:.spec.nodeID,ESTADO:.status.currentState' \
+      --no-headers 2>/dev/null | sed 's/^/    /'
+  done
+
+  # 2. Pods de Moodle: cada réplica y su nodo
+  log_sub "Pods de Moodle"
+  kubectl -n "${MOODLE_NS}" get pods -l app=moodle \
+    -o custom-columns='  POD:.metadata.name,NODO:.spec.nodeName,ESTADO:.status.phase' \
+    --no-headers 2>/dev/null | sed 's/^/    /'
+
+  # 3. Vista compacta de salud de los volúmenes
+  log_sub "Salud de los volúmenes"
+  kubectl -n longhorn-system get volumes.longhorn.io \
+    -o custom-columns='  VOLUMEN:.metadata.name,ESTADO:.status.state,ROBUSTEZ:.status.robustness,RÉPLICAS:.spec.numberOfReplicas' \
+    --no-headers 2>/dev/null | sed 's/^/    /'
+
+  echo ""
+  log_ok "Distribución verificada. El clúster está en alta disponibilidad."
+
+  echo ""
+  echo "========================================================="
+  echo "Próximo paso: Inicializar Galera y Maxscale"
+  echo "Ejecute el script 09-galera-maxscale"
+  echo "========================================================="
+  echo ""
+}
+
 main(){
 require_root
 show_banner
@@ -234,7 +356,10 @@ verify_etcd_members
 generate_rbac
 deploy_kube_vip
 verify_kube_vip
-log_ok "Fase kube-vip completada."
+verify_storage_baseline
+ensure_longhorn_ha
+scale_moodle
+show_ha_summary
 }
 
 main "$@"
