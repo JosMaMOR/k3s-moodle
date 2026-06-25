@@ -1452,6 +1452,10 @@ echo "=== HPA ==="
 kubectl get hpa -n moodle-prod
 
 echo ""
+echo "=== CLUSTER TOKEN ==="
+cat /var/lib/rancher/k3s/server/node-token~
+
+echo ""
 echo "========================================================="
 echo "Próximo paso: Conectar nodos B y Pi"
 echo "Paso 1: Preparar los nodos con script 07-join-nodes.sh"

@@ -1,4 +1,4 @@
-#!/bin/bash
+:#!/bin/bash
 # ======================================================
 # 08-form-HA-cluster.sh 
 # Formacion de alta disponibilidad en el cluster
@@ -231,6 +231,26 @@ verify_kube_vip() {
     sleep "${interval}"
     elapsed=$((elapsed + interval))
   done
+}
+
+# ── 1. Doble verificación del estado base de almacenamiento ───────────────────
+# Antes de escalar nada, confirmamos que la exclusión de la Pi quedó como debe:
+# exactamente 2 nodos Longhorn (A y B) y 2 managers sanos. Si la Pi se hubiera
+# colado, el conteo sería 3 → abortamos antes de tocar réplicas.
+verify_storage_baseline() {
+  log_sub "Verificando estado base de Longhorn (A y B, Pi excluida)"
+
+  local lh_nodes mgr_pods
+  lh_nodes=$(kubectl -n longhorn-system get nodes.longhorn.io --no-headers 2>/dev/null | wc -l)
+  [ "${lh_nodes}" -eq 2 ] \
+    || die "Se esperaban 2 nodos Longhorn (A y B), hay ${lh_nodes}. ¿La Pi se coló o falta B?"
+  log_ok "${lh_nodes} nodos Longhorn registrados (esperado: A y B)."
+
+  mgr_pods=$(kubectl -n longhorn-system get pods -l app=longhorn-manager --no-headers 2>/dev/null \
+    | awk '$2=="2/2" && $3=="Running"{c++} END{print c+0}')
+  [ "${mgr_pods}" -eq 2 ] \
+    || die "Se esperaban 2 longhorn-manager sanos (2/2 Running), hay ${mgr_pods}."
+  log_ok "${mgr_pods} longhorn-manager sanos."
 }
 
 # ── 2. Asegurar HA de almacenamiento: cada volumen con 2 réplicas en A y B ─────
