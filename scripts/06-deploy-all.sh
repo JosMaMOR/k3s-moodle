@@ -475,25 +475,6 @@ cat > 03-persistent-volume-claims.yaml << 'EOF'
 #   dinámicamente. SIN selector — no hay PV preexistente que emparejar.
 # ----------------------------------------------------------------------------
 
-# ── PVC: MariaDB ──────────────────────────────────────────────────────────────
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: mariadb-pvc
-  namespace: moodle-prod
-  labels:
-    app: mariadb
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: local-raid
-  resources:
-    requests:
-      storage: 20Gi
-  selector:
-    matchLabels:
-      app: mariadb
----
 # ── PVC: Redis ────────────────────────────────────────────────────────────────
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -724,6 +705,18 @@ fi
 cat > galera-values.yaml << 'EOF'
 fullnameOverride: mariadb          # Service y pods quedan 'mariadb' → Moodle no cambia su host
 
+# Imagen: el chart apunta por defecto a docker.io/bitnami/mariadb-galera, que
+# desde el 28-ago-2025 dejó de estar en el tier gratis (se movió a bitnamilegacy).
+# Apuntamos al repositorio legacy y habilitamos allowInsecureImages para que el
+# chart acepte un repositorio que no es el oficial. (Stopgap: legacy no recibe
+# parches; a futuro conviene mirror propio o Bitnami Secure Images.)
+global:
+  security:
+    allowInsecureImages: true
+
+image:
+  repository: bitnamilegacy/mariadb-galera
+
 existingSecret: mariadb-secrets
 
 galera:
@@ -758,7 +751,7 @@ nodeSelector:
   tesoem.edu.mx/longhorn-node: "true"
 EOF
 
-helm install mariadb oci://registry-1.docker.io/bitnamicharts/mariadb-galera \
+helm upgrade --install mariadb oci://registry-1.docker.io/bitnamicharts/mariadb-galera \
   --version 16.0.1 \
   --namespace moodle-prod \
   -f galera-values.yaml
