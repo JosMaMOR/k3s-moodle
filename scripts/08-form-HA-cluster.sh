@@ -1,4 +1,4 @@
-:#!/bin/bash
+#!/bin/bash
 # ======================================================
 # 08-form-HA-cluster.sh 
 # Formacion de alta disponibilidad en el cluster
@@ -19,7 +19,7 @@ MOODLE_NS="moodle-prod"
 MOODLE_PVCS="moodle-html-pvc moodle-data-pvc"
 MOODLE_DEPLOY="moodle"
 MOODLE_HPA="moodle-hpa"
-MOODLE_TARGET_REPLICAS=3
+MOODLE_TARGET_REPLICAS=2
 
 # ── Colores para output ───────────────────────────────────────────────────────
 RED='\033[0;31m'

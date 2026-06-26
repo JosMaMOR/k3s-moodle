@@ -280,33 +280,8 @@ kubectl annotate node ${NODE_NAME} node.longhorn.io/default-node-tags='["storage
 # Longhorn gestiona el ciclo de vida de esos volúmenes (creación, permisos vía
 # fsGroup del pod). Solo MariaDB y Redis siguen necesitando directorios locales.
 echo "[*] Preparando directorios en RAID (solo MariaDB y Redis)..."
-mkdir -p ${RAID_BASE}/mariadb
+mkdir -p ${RAID_BASE}/galera
 mkdir -p ${RAID_BASE}/redis
-
-# ── Detección de inicialización incompleta de MariaDB ─────────────────────────
-# Si el directorio tiene archivos InnoDB pero NO tiene mysql/db.frm o mysql/db.MAD
-# significa que una ejecución anterior falló a mitad de la inicialización.
-# En ese caso es más seguro limpiar y dejar que MariaDB inicialice desde cero.
-MARIADB_DIR="${RAID_BASE}/mariadb"
-INNODB_FILE="${MARIADB_DIR}/ibdata1"
-MYSQL_DB_FILE="${MARIADB_DIR}/mysql/db.MAD"
-
-if [ -f "${INNODB_FILE}" ] && [ ! -f "${MYSQL_DB_FILE}" ]; then
-  echo ""
-  echo "  ╔══════════════════════════════════════════════════════════════╗"
-  echo "  ║  ADVERTENCIA: datos de MariaDB incompletos detectados        ║"
-  echo "  ║  Se encontró ibdata1 pero faltan tablas del sistema mysql.*  ║"
-  echo "  ║  Limpiando directorio para permitir inicialización limpia... ║"
-  echo "  ╚══════════════════════════════════════════════════════════════╝"
-  echo ""
-  # Backup de seguridad del estado corrupto (por si acaso)
-  BACKUP_DIR="${RAID_BASE}/mariadb-corrupted-$(date +%Y%m%d-%H%M%S)"
-  mv "${MARIADB_DIR}" "${BACKUP_DIR}"
-  mkdir -p "${MARIADB_DIR}"
-  echo "  Estado anterior respaldado en: ${BACKUP_DIR}"
-  echo "  Directorio limpio y listo para inicialización."
-  echo ""
-fi
 
 # Permisos por servicio — cada imagen corre con un uid distinto:
 #   uid 999  → mariadb:lts      (usuario interno: mysql) [Debian - auto-inicializa]
@@ -316,8 +291,7 @@ fi
 # sobre el volumen que Longhorn monta. El chown/chmod del host ya no aplica
 # porque el volumen ya no es un directorio del RAID local.
 
-chown -R 999:999  ${RAID_BASE}/mariadb
-chmod -R 750      ${RAID_BASE}/mariadb
+chmod -R 750      ${RAID_BASE}/galera
 
 chown -R 999:999  ${RAID_BASE}/redis
 chmod -R 750      ${RAID_BASE}/redis
@@ -352,7 +326,7 @@ kubectl apply -f 00-namespace.yaml
 echo "[*] Creando StorageClass..."
 
 cat > 01-storageclass.yaml << 'EOF'
-# ── StorageClass 1: local-raid (MariaDB + Redis) — SIN CAMBIOS ───────────────
+# ── StorageClass 1: local-raid (Redis) ───────────────
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -360,13 +334,21 @@ metadata:
   annotations:
     storageclass.kubernetes.io/is-default-class: "false"
 provisioner: kubernetes.io/no-provisioner
-# Immediate: el PV se vincula al PVC en el momento de su creación,
-# sin esperar a que un Pod lo consuma. Necesario para que el loop
-# de verificación "Bound" del script funcione correctamente.
 volumeBindingMode: Immediate
 reclaimPolicy: Retain
 ---
-# ── StorageClass 2: longhorn-moodle (moodle-html + moodle-data) ──────────────
+# ── StorageClass 2: local-galera (MariaDB + Galera) ───────────────
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-galera
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer   # ← la diferencia con local-raid
+reclaimPolicy: Retain
+---
+# ── StorageClass 3: longhorn-moodle (moodle-html + moodle-data) ──────────────
 # driver.longhorn.io aprovisiona dinámicamente: no hay que declarar PVs a mano.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -405,28 +387,42 @@ cat > 02-persistent-volumes.yaml << 'EOF'
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: mariadb-pv
-  labels:
-    app: mariadb
-    tier: database
+  name: mariadb-galera-pv-a
 spec:
-  capacity:
-    storage: 20Gi
-  accessModes:
-    - ReadWriteOnce           # Solo un pod a la vez (StatefulSet 1 réplica)
+  capacity: { storage: 20Gi }
+  accessModes: [ReadWriteOnce]
   persistentVolumeReclaimPolicy: Retain
-  storageClassName: local-raid
+  storageClassName: local-galera
   volumeMode: Filesystem
   local:
-    path: /moodlek3s/mariadb
+    path: /moodlek3s/galera          # ← ruta nueva, dedicada
   nodeAffinity:
     required:
       nodeSelectorTerms:
       - matchExpressions:
         - key: kubernetes.io/hostname
           operator: In
-          values:
-          - k3s-moodle-master
+          values: [k3s-moodle-master]    # nodo A
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mariadb-galera-pv-b
+spec:
+  capacity: { storage: 20Gi }
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-galera
+  volumeMode: Filesystem
+  local:
+    path: /moodlek3s/galera
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values: [node-b-k3s-moodle]    # nodo B
 ---
 # ── PV: Redis ─────────────────────────────────────────────────────────────────
 apiVersion: v1
@@ -565,7 +561,7 @@ kubectl apply -f 03-persistent-volume-claims.yaml
 
 # Verificar que los PVCs queden en estado Bound antes de continuar
 echo "[*] Esperando que los PVCs queden en estado Bound..."
-for PVC in mariadb-pvc redis-pvc moodle-html-pvc moodle-data-pvc; do
+for PVC in redis-pvc moodle-html-pvc moodle-data-pvc; do
   echo -n "    Esperando $PVC..."
   RETRIES=0
   until kubectl get pvc "$PVC" -n moodle-prod -o jsonpath='{.status.phase}' 2>/dev/null | grep -q "Bound"; do
@@ -695,8 +691,9 @@ metadata:
   namespace: moodle-prod
 type: Opaque
 stringData:
-  MARIADB_ROOT_PASSWORD: "@@Ad1v1na#2@@"
-  MARIADB_PASSWORD: "@@Ad1v1na#2@@"
+  mariadb-root-password: "@@Ad1v1na#2@@"
+  mariadb-password: "@@Ad1v1na#2@@"
+  mariadb-galera-mariabackup-password: "@@Ad1v1na#2@@"
 ---
 apiVersion: v1
 kind: Secret
@@ -711,127 +708,63 @@ EOF
 kubectl apply -f 11-secrets.yaml
 
 # ==========================================
-# 7. MARIADB STATEFULSET
+# 7. MARIADB GALERA (vía Helm)
 # ==========================================
-# CAMBIO CLAVE (v2): Se usa 'args' en lugar de 'command'.
-# 'command' sobreescribe docker-entrypoint.sh completo → MariaDB nunca
-# ejecuta mysql_install_db y el directorio vacío nunca se inicializa.
-# 'args' pasa los flags directamente al entrypoint que sí inicializa primero.
-#
-# Se usa volumes + claimName: mariadb-pvc (PVC estático con nombre fijo).
-# Más predecible que volumeClaimTemplates en single-node con PVs manuales.
-echo "[*] Desplegando MariaDB..."
+# Reemplaza la MariaDB plana por un clúster Galera (camino A).
+# Arranca en 1 nodo; el 09 escala a 2 + garbd. Usa los PVs locales
+# (local-galera) y el Secret mariadb-secrets ya aplicados arriba.
+echo "[*] Desplegando MariaDB Galera vía Helm..."
 
-cat > 20-mariadb.yaml << 'EOF'
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: mariadb
-  namespace: moodle-prod
-  labels:
-    app: mariadb
-    tier: database
-spec:
-  serviceName: mariadb
-  replicas: 1
-  selector:
-    matchLabels:
-      app: mariadb
-  template:
-    metadata:
-      labels:
-        app: mariadb
-        tier: database
-    spec:
-      nodeSelector:
-        kubernetes.io/hostname: k3s-moodle-master
-      terminationGracePeriodSeconds: 60
-      containers:
-      - name: mariadb
-        image: mariadb:lts
-        ports:
-        - containerPort: 3306
-          name: mysql
-        envFrom:
-        - configMapRef:
-            name: mariadb-config
-        - secretRef:
-            name: mariadb-secrets
-        env:
-        - name: MARIADB_HOST
-          value: "localhost"
-        # IMPORTANTE: usar 'args' en lugar de 'command'
-        # 'command' sobreescribe docker-entrypoint.sh completo → MariaDB nunca
-        # ejecuta mysql_install_db y el directorio vacío nunca se inicializa.
-        # 'args' pasa los flags directamente al entrypoint que sí inicializa primero.
-        args:
-        - --character-set-server=utf8mb4
-        - --collation-server=utf8mb4_unicode_ci
-        - --init-connect=SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci
-        - --skip-character-set-client-handshake
-        - --innodb_file_per_table=1
-        - --innodb_buffer_pool_size=1G
-        - --innodb_log_file_size=256M
-        - --max_connections=200
-        volumeMounts:
-        - name: mariadb-data
-          mountPath: /var/lib/mysql
-        resources:
-          requests:
-            memory: "512Mi"
-            cpu: "250m"
-          limits:
-            memory: "2Gi"
-            cpu: "1000m"
-        livenessProbe:
-          exec:
-            command:
-            - sh
-            - -c
-            - "mariadb-admin ping -h localhost -u root -p${MARIADB_ROOT_PASSWORD}"
-          initialDelaySeconds: 30
-          periodSeconds: 10
-          timeoutSeconds: 5
-          failureThreshold: 3
-        readinessProbe:
-          exec:
-            command:
-            - sh
-            - -c
-            - "mariadb-admin ping -h localhost -u root -p${MARIADB_ROOT_PASSWORD}"
-          initialDelaySeconds: 15
-          periodSeconds: 5
-          timeoutSeconds: 3
-          failureThreshold: 3
-      # Usar volumes + claimName para PVC estático con nombre fijo
-      # (más predecible que volumeClaimTemplates en single-node)
-      volumes:
-      - name: mariadb-data
-        persistentVolumeClaim:
-          claimName: mariadb-pvc
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: mariadb
-  namespace: moodle-prod
-  labels:
-    app: mariadb
-spec:
-  type: ClusterIP
-  ports:
-  - port: 3306
-    targetPort: 3306
-    protocol: TCP
-    name: mysql
-  selector:
-    app: mariadb
+# Helm: instalar si no está presente
+if ! command -v helm >/dev/null 2>&1; then
+  echo "[*] Helm no encontrado — instalando..."
+  curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+fi
+
+cat > galera-values.yaml << 'EOF'
+fullnameOverride: mariadb          # Service y pods quedan 'mariadb' → Moodle no cambia su host
+
+existingSecret: mariadb-secrets
+
+galera:
+  name: moodle-galera
+  mariabackup:
+    user: mariabackup
+
+db:
+  name: moodle
+  user: moodleTESOEM
+
+replicaCount: 1                    # el 09 hace helm upgrade a 2
+
+extraFlags: >-
+  --character-set-server=utf8mb4
+  --collation-server=utf8mb4_unicode_ci
+  --skip-character-set-client-handshake
+  --innodb_file_per_table=1
+  --innodb_buffer_pool_size=1G
+  --innodb_log_file_size=256M
+  --max_connections=200
+
+persistence:
+  enabled: true
+  storageClass: local-galera
+  size: 20Gi
+  accessModes:
+    - ReadWriteOnce
+
+podAntiAffinityPreset: hard
+nodeSelector:
+  tesoem.edu.mx/longhorn-node: "true"
 EOF
 
-kubectl apply -f 20-mariadb.yaml
+helm install mariadb oci://registry-1.docker.io/bitnamicharts/mariadb-galera \
+  --version 16.0.1 \
+  --namespace moodle-prod \
+  -f galera-values.yaml
 
-echo "[*] Esperando MariaDB (hasta 300s)..."
-kubectl rollout status statefulset/mariadb -n moodle-prod --timeout=300s
+echo "[*] Esperando que Galera quede listo (hasta 600s)..."
+kubectl rollout status statefulset/mariadb -n moodle-prod --timeout=600s
 
 # ==========================================
 # 8. REDIS DEPLOYMENT
@@ -1453,7 +1386,7 @@ kubectl get hpa -n moodle-prod
 
 echo ""
 echo "=== CLUSTER TOKEN ==="
-cat /var/lib/rancher/k3s/server/node-token~
+cat /var/lib/rancher/k3s/server/node-token
 
 echo ""
 echo "========================================================="
