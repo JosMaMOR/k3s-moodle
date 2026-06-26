@@ -1365,6 +1365,23 @@ echo "=== PERSISTENT VOLUME CLAIMS ==="
 kubectl get pvc -n moodle-prod
 
 echo ""
+echo "=== GALERA STORAGE CLASS ==="
+kubectl get storageclass local-galera
+
+echo ""
+echo "=== GALERA PVs ==="
+kubectl get pv mariadb-galera-pv-a mariadb-galera-pv-b
+
+echo ""
+echo "=== GALERA PVCs ==="
+kubectl get pvc -n moodle-prod
+echo ""
+kubectl get pvc data-mariadb-0 -n moodle-prod -o jsonpath='{.spec.volumeName}'; echo
+echo ""
+echo "Donde estan los pods de galera"
+kubectl get pods -n moodle-prod -l app.kubernetes.io/instance=mariadb -o wide
+
+echo ""
 echo "=== PODS ==="
 kubectl get pods -n moodle-prod -o wide
 
