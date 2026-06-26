@@ -192,7 +192,7 @@ prepare_storage() {
 
     # Crear estructura de directorios
     log_sub "Creando estructura de directorios..."
-    mkdir -p "${RAID_BASE}/mariadb"
+    mkdir -p "${RAID_BASE}/galera"
     mkdir -p "${RAID_BASE}/redis"
     log_ok "Directorios creados en ${RAID_BASE}/"
 
@@ -201,8 +201,7 @@ prepare_storage() {
     #   uid 999 → redis:7-alpine (usuario redis dentro del contenedor)
     #   uid 1001 → moodle-apache (usuario www-data dentro del contenedor)
     log_sub "Configurando permisos..."
-    chown -R 999:999   "${RAID_BASE}/mariadb"
-    chmod -R 750       "${RAID_BASE}/mariadb"
+    chmod -R 750       "${RAID_BASE}/galera"
 
     chown -R 999:999   "${RAID_BASE}/redis"
     chmod -R 750       "${RAID_BASE}/redis"
