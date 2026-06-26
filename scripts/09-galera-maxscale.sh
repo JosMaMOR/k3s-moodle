@@ -52,3 +52,109 @@ require_root() {
 check_command() {
   command -v "$1" &>/dev/null
 }
+
+# ── Config Galera ─────────────────────────────────────────────────────────────
+GALERA_RELEASE="mariadb"
+GALERA_CHART="oci://registry-1.docker.io/bitnamicharts/mariadb-galera"
+GALERA_CHART_VERSION="16.0.1"
+NODE_B="node-b-k3s-moodle"
+SST_TIMEOUT=900          # margen para el SST (la copia puede tardar minutos)
+
+# ── Lee wsrep_cluster_size desde mariadb-0 (devuelve un número; 0 si falla) ────
+get_cluster_size() {
+  local pw size
+  pw=$(kubectl get secret mariadb-secrets -n "$MOODLE_NS" \
+        -o jsonpath='{.data.mariadb-root-password}' 2>/dev/null | base64 -d 2>/dev/null) || true
+  size=$(kubectl exec "${GALERA_RELEASE}-0" -n "$MOODLE_NS" -- \
+          mariadb -u root -p"${pw}" -N \
+          -e "SHOW STATUS LIKE 'wsrep_cluster_size';" 2>/dev/null \
+          | awk '{print $2}') || true
+  echo "${size:-0}"
+}
+
+# ── Verificación del estado base antes de escalar ─────────────────────────────
+verify_base() {
+  log_sub "Verificando estado base antes de escalar..."
+
+  # Nodo B unido y Ready
+  local b_ready
+  b_ready=$(kubectl get node "$NODE_B" \
+            -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || true
+  [ "$b_ready" = "True" ] || die "El nodo B ($NODE_B) no está Ready. Corre el 07 primero."
+  log_ok "Nodo B unido y Ready."
+
+  # B etiquetado para storage (sin el label, el nodeSelector no programaría mariadb-1 ahí)
+  if ! kubectl get nodes -l tesoem.edu.mx/longhorn-node=true \
+        -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | grep -qw "$NODE_B"; then
+    die "El nodo B no tiene el label tesoem.edu.mx/longhorn-node=true; mariadb-1 no caería en él."
+  fi
+  log_ok "Nodo B etiquetado para storage."
+
+  # mariadb-0 (el donante del SST) sano
+  local m0_ready
+  m0_ready=$(kubectl get pod "${GALERA_RELEASE}-0" -n "$MOODLE_NS" \
+            -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || true
+  [ "$m0_ready" = "True" ] || die "${GALERA_RELEASE}-0 no está Ready; no puede ser donante del SST."
+  log_ok "${GALERA_RELEASE}-0 Ready (donante listo)."
+
+  # PV de B disponible para reclamar
+  local pvb
+  pvb=$(kubectl get pv mariadb-galera-pv-b -o jsonpath='{.status.phase}' 2>/dev/null) || true
+  case "$pvb" in
+    Available|Bound) log_ok "PV de B listo (estado: $pvb)." ;;
+    *) die "mariadb-galera-pv-b no está disponible (estado: ${pvb:-inexistente})." ;;
+  esac
+}
+
+# ── Escalado: 1 → 2 réplicas vía helm upgrade ─────────────────────────────────
+scale_galera() {
+  log_sub "Escalando Galera a 2 réplicas (helm upgrade)..."
+  helm upgrade "$GALERA_RELEASE" "$GALERA_CHART" \
+    --version "$GALERA_CHART_VERSION" \
+    --namespace "$MOODLE_NS" \
+    --reuse-values \
+    --set replicaCount=2
+  log_ok "helm upgrade aplicado (replicaCount=2). El chart creará mariadb-1 y disparará el SST."
+}
+
+# ── Verificar que el clúster quedó en 2 (bucle con timeout) ───────────────────
+verify_galera_cluster() {
+  log_sub "Esperando wsrep_cluster_size = 2 (el SST puede tardar varios minutos)..."
+  local retries=0 max=90 size   # 90 * 10s = 900s
+  while true; do
+    size=$(get_cluster_size)
+    if [ "$size" = "2" ]; then
+      log_ok "Clúster Galera sincronizado: wsrep_cluster_size = 2"
+      return 0
+    fi
+    retries=$((retries+1))
+    if [ "$retries" -ge "$max" ]; then
+      die "wsrep_cluster_size no llegó a 2 (último valor: ${size}). Revisa: kubectl logs ${GALERA_RELEASE}-1 -n ${MOODLE_NS}"
+    fi
+    echo -n "."
+    sleep 10
+  done
+}
+
+# ── Orquestación ──────────────────────────────────────────────────────────────
+main() {
+  require_root
+  check_command kubectl || die "kubectl no encontrado."
+  check_command helm    || die "helm no encontrado."
+
+  log_step "Expandir Galera a 2 nodos (A + B)"
+  verify_base
+  scale_galera
+
+  log_sub "Esperando a que mariadb-1 se cree y una (rollout + SST)..."
+  kubectl rollout status statefulset/"$GALERA_RELEASE" -n "$MOODLE_NS" \
+    --timeout="${SST_TIMEOUT}s" \
+    || log_warn "rollout status expiró; verifico wsrep directamente por si sigue en Joining."
+
+  verify_galera_cluster
+
+  log_step "Galera de 2 nodos operativo"
+  log_info "Siguiente: garbd (árbitro) en la Pi para el voto impar, y luego MaxScale."
+}
+
+main "$@"
