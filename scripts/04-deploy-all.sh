@@ -735,7 +735,6 @@ extraFlags: >-
   --collation-server=utf8mb4_unicode_ci
   --skip-character-set-client-handshake
   --innodb_file_per_table=1
-  --innodb_buffer_pool_size=1G
   --innodb_log_file_size=256M
   --max_connections=200
 
