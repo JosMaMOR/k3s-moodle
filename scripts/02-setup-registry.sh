@@ -2,62 +2,6 @@
 # ============================================================================
 # 02-setup-registry.sh
 # Instalación y configuración de Registry privado local en el nodo K3s
-#
-# PROPÓSITO:
-#   Despliega un container registry privado (Docker Registry v2) directamente
-#   en el nodo k3s-moodle-master usando Podman. El registry escucha en
-#   localhost:5000 y se configura como servicio systemd para que arranque
-#   automáticamente con el sistema.
-#
-#   Una vez instalado, el flujo de imágenes queda así:
-#
-#     Podman build
-#         │
-#         ▼
-#     podman push localhost:5000/moodle-apache:5.1-k3s-raid
-#         │
-#         ▼
-#     Registry local (:5000)  ←── K3s configurado para confiar en él
-#         │
-#         ▼
-#     containerd pull (pods moodle)
-#
-#   Esto elimina completamente la dependencia de Docker Hub y el error
-#   ImagePullBackOff causado por intentar descargar una imagen local
-#   desde internet.
-#
-# QUÉ HACE ESTE SCRIPT:
-#   1. Despliega el contenedor registry:2 con Podman en localhost:5000
-#   2. Crea un servicio systemd (podman-registry) para arranque automático
-#   3. Configura K3s para confiar en localhost:5000 como registry inseguro
-#      (registries.yaml en /etc/rancher/k3s/)
-#   4. Reinicia K3s para aplicar la configuración del registry
-#   5. Verifica que el registry responde y K3s lo reconoce
-#
-# USO:
-#   chmod +x 02-setup-registry.sh
-#   ./02-setup-registry.sh
-#
-# PUERTOS:
-#   5000/tcp → Registry API (push/pull de imágenes)
-#
-# DATOS PERSISTENTES:
-#   /moodlek3s/registry/data  → capas de imágenes almacenadas
-#
-# FLUJO COMPLETO DEL PROYECTO:
-#   00-cleanup-k3s.sh          ← limpieza previa si se necesita
-#   01-prepare-almalinux9.sh   ← preparación del SO y K3s
-#   02-setup-registry.sh       ← ESTE SCRIPT
-#   05-build-image.sh          ← build + push al registry
-#   06-deploy-all.sh           ← despliegue (pull desde registry local)
-#
-# REQUISITOS:
-#   - AlmaLinux 9 con K3s instalado (01-prepare-almalinux9.sh ejecutado)
-#   - Podman instalado
-#   - Ejecutar como root
-#
-# AUTOR: Infraestructura TESOEM
-# VERSIÓN: 1.0
 # ============================================================================
 
 set -euo pipefail
@@ -398,14 +342,11 @@ echo -e "  ${BOLD}Datos:${NC}         ${REGISTRY_DATA_DIR}"
 echo ""
 echo -e "  ${BOLD}Próximo paso — construir y publicar la imagen:${NC}"
 echo ""
-echo -e "  ${CYAN}./05-build-image.sh${NC}"
+echo -e "  ${CYAN}./03-build-image.sh${NC}"
 echo ""
-echo -e "  El script 05 hará:"
+echo -e "  El script 03 hará:"
 echo -e "    podman build -t localhost:5000/moodle-apache:5.1-k3s-raid ."
 echo -e "    podman push  localhost:5000/moodle-apache:5.1-k3s-raid"
-echo ""
-echo -e "  Luego ejecutar el despliegue:"
-echo -e "  ${CYAN}./06-deploy-all.sh${NC}"
 echo ""
 echo -e "  Completado — $(date '+%Y-%m-%d %H:%M:%S')"
 echo ""

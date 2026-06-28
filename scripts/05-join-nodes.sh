@@ -545,6 +545,13 @@ main(){
     prepare_node
     node_join
     register_longhorn_node
+
+echo ""
+echo "========================================================="
+echo "Próximo paso: Generar replicas de Longhorn y Moodle"
+echo "Ejecute el script 06-form-HA-cluster.sh"
+echo "========================================================="
+echo ""
 }
 
 main "$@"

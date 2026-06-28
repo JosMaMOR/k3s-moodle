@@ -360,13 +360,6 @@ show_ha_summary() {
 
   echo ""
   log_ok "Distribución verificada. El clúster está en alta disponibilidad."
-
-  echo ""
-  echo "========================================================="
-  echo "Próximo paso: Inicializar Galera y Maxscale"
-  echo "Ejecute el script 09-galera-maxscale"
-  echo "========================================================="
-  echo ""
 }
 
 main(){
@@ -380,6 +373,14 @@ verify_storage_baseline
 ensure_longhorn_ha
 scale_moodle
 show_ha_summary
+
+echo ""
+echo "============================================================"
+echo "Próximo paso: Generar replicas de Galera e instalar maxscale"
+echo "Ejecute el script 07-galera-maxscale"
+echo "============================================================"
+echo ""
+
 }
 
 main "$@"

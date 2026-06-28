@@ -3,54 +3,6 @@
 # 01-prepare-almalinux9.sh
 # Preparación completa de AlmaLinux 9 para despliegue de Moodle HA en K3s
 #
-# PROPÓSITO:
-#   Configura desde cero un servidor AlmaLinux 9 para ejecutar K3s con
-#   Moodle 5.1 en alta disponibilidad. El script realiza en un solo paso:
-#
-#     1. Validación de requisitos del sistema (RAM, CPU, disco)
-#     2. Actualización del SO y repositorios base
-#     3. Instalación de dependencias del sistema (git, curl, wget, jq, etc.)
-#     4. Instalación y configuración de Podman (builder de imágenes)
-#     5. Preparación del sistema para K3s:
-#          - Deshabilitar swap
-#          - Configurar parámetros del kernel (sysctl)
-#          - Configurar módulos de kernel (br_netfilter, overlay)
-#          - Ajustar límites del sistema (ulimits)
-#          - Configurar SELinux en modo permisivo
-#          - Configurar firewall (firewalld)
-#     6. Instalación de K3s con containerd
-#     7. Importación de la imagen Podman al namespace k8s.io de containerd
-#     8. Preparación del almacenamiento RAID (/moodlek3s)
-#     9. Instalación de herramientas de diagnóstico (stern, k9s)
-#    10. Verificación completa del entorno
-#
-# USO:
-#   chmod +x 01-prepare-almalinux9.sh
-#   ./01-prepare-almalinux9.sh
-#
-#   Variables de entorno opcionales antes de ejecutar:
-#     K3S_VERSION="v1.29.4+k3s1"   # versión específica de K3s
-#     SKIP_FIREWALL=true            # si el firewall está gestionado externamente
-#     MOODLE_IMAGE_TAG="5.1-k3s-raid"  # tag de la imagen Moodle
-#
-# FLUJO COMPLETO DEL PROYECTO:
-#   00-cleanup-k3s.sh          ← limpieza (si se necesita)
-#   01-prepare-almalinux9.sh   ← ESTE SCRIPT
-#   02-build-context.sh        ← construir contexto Docker
-#   03-build-image.sh          ← construir imagen con Podman (05-build-image.sh)
-#   06-deploy-all.sh           ← despliegue completo
-#   07-test.sh                 ← verificación
-#
-# REQUISITOS MÍNIMOS DEL SISTEMA:
-#   - AlmaLinux 9.x (probado en 9.3 y 9.4)
-#   - 4 GB RAM mínimo (8 GB recomendado para producción)
-#   - 4 vCPU mínimo
-#   - 100 GB disco (RAID en /moodlek3s o disco local)
-#   - Acceso a internet para descargar K3s y paquetes
-#   - Ejecutar como root
-#
-# AUTOR: Infraestructura TESOEM
-# VERSIÓN: 1.0
 # ============================================================================
 
 set -euo pipefail
@@ -1124,6 +1076,14 @@ main() {
   install_diagnostic_tools # Paso 8: stern, k9s, crictl
   configure_system         # Paso 9: hostname, timezone, aliases
   verify_environment       # Paso 10: verificación final
+
+echo ""
+echo "==========================================================="
+echo "Próximo paso: Preparar el registry para la imagen de moodle"
+echo "Ejecute script 02-setup-registry"
+echo "==========================================================="
+echo ""
+  
 }
 
 main "$@"

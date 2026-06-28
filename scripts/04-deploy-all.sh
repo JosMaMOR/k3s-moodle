@@ -2,60 +2,6 @@
 # 06-deploy-all.sh - Despliegue completo de Moodle HA en K3s
 # Ejecutar como root después de 05-build-image.sh
 #
-# INSTALACION DE LONGHORN WIP:
-#   - WIP Instalacion de Longhorn despues de creacion del registry - l 110
-#   - WIP Linea 281. Hacer algo para poder cambiar el numero de replicas de longhorn al ejecutar el script
-#   - WIP Linea 471 - Tamaño de volumen para moodle. En prod deben ser 50Gi
-#
-# CORRECCIONES APLICADAS v6:
-#   - Despliegue en 2 fases:
-#     Fase 1: 1 réplica para instalación inicial (evita race condition)
-#     Fase 2: escala a 3 réplicas HA tras config.php generado
-#   - maxUnavailable: 0 durante instalación (no interrumpir el pod único)
-#   - Verificación de config.php y tablas BD entre fases
-#
-# CORRECCIONES APLICADAS v5:
-#   - Apache HTTP only puerto 8080, sin SSL en la imagen
-#   - Eliminado volumeMount ssl-certs y Secret mcc-tesoem-tls
-#   - Probes cambiadas de HTTPS:8443 a HTTP:8080
-#   - Ingress apunta a puerto 8080 HTTP (Traefik termina TLS)
-#   - serversscheme cambiado de https a http
-#
-# CORRECCIONES APLICADAS v4:
-#   - Imagen Moodle cambiada de "moodle-apache:5.1-k3s-raid"
-#     a "localhost:5000/moodle-apache:5.1-k3s-raid" (registry local)
-#   - imagePullPolicy cambiado de IfNotPresent a Always para que K3s
-#     siempre haga pull desde el registry local en lugar de buscar
-#     la imagen en el cache local de containerd
-#   - Añadida verificación de registry al inicio del script
-#   - Añadida verificación de imagen en registry antes de desplegar
-#   - CronJob actualizado con la nueva imagen del registry
-#
-# CORRECCIONES APLICADAS v3:
-#   - PV moodle-html y moodle-data con label 'volume' diferenciadora
-#     para evitar que ambos PVCs compitan por el mismo PV en el binding.
-#   - PVC moodle-html-pvc y moodle-data-pvc con selector.matchLabels
-#     que incluye 'volume: moodle-html' / 'volume: moodle-data'.
-#   - Redis liveness/readiness probe incluye autenticación:
-#     redis-cli -a $(REDIS_PASSWORD) ping  ← evita NOAUTH con --requirepass
-#   - CronJob: moodle-html montado sin readOnly en volumes.pvc (el PVC
-#     es ReadWriteMany) y con readOnly: true solo en volumeMount del
-#     contenedor — separación correcta entre claim y mount.
-#   - Todos los fixes de v2 se conservan intactos.
-#
-# CORRECCIONES APLICADAS v2:
-#   - Añadidos PersistentVolumes (hostPath sobre RAID en /moodlek3s)
-#   - Añadidos PersistentVolumeClaims para mariadb, redis, moodle-html, moodle-data
-#   - mariadb: migrado de volumes.pvc → volumes + claimName (patrón correcto
-#     para PVC estático con nombre fijo en single-node StatefulSet)
-#   - moodle-html-pvc y moodle-data-pvc con ReadWriteMany (3 réplicas + CronJob)
-#   - mariadb-pvc y redis-pvc con ReadWriteOnce (acceso exclusivo)
-#   - MariaDB: 'command' reemplazado por 'args' — preserva docker-entrypoint.sh
-#     y permite que mysql_install_db inicialice el directorio en primer arranque
-#   - MariaDB probes usan mariadb-admin con -p${MARIADB_ROOT_PASSWORD}
-#   - Redis liveness/readiness probe corregida (redis-cli ping, no incr)
-#   - Orden de aplicación: StorageClass → PV → PVC → workloads
-#   - nodeAffinity en PVs para garantizar scheduling en k3s-moodle-master
 
 set -e
 
@@ -1400,8 +1346,8 @@ cat /var/lib/rancher/k3s/server/node-token
 echo ""
 echo "========================================================="
 echo "Próximo paso: Conectar nodos B y Pi"
-echo "Paso 1: Preparar los nodos con script 07-join-nodes.sh"
-echo "Paso 2: Ejecutar script 08-form-HA-cluster en nodo A para"
+echo "Paso 1: Preparar los nodos con script 05-join-nodes.sh"
+echo "Paso 2: Ejecutar script 06-form-HA-cluster en nodo A para"
 echo "        escalar conexion de nodos a Kube-VIP"
 echo "========================================================="
 echo ""

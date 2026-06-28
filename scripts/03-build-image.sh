@@ -2,46 +2,6 @@
 # ============================================================================
 # 05-build-image.sh
 # Build de la imagen Moodle con Podman y push al registry local (localhost:5000)
-#
-# PROPÓSITO:
-#   Construye la imagen Docker/OCI de Moodle usando Podman y la publica
-#   en el registry privado local (localhost:5000). Desde ahí, K3s/containerd
-#   la descarga directamente cuando crea los pods, sin depender de Docker Hub.
-#
-# FLUJO DE LA IMAGEN:
-#   Dockerfile
-#       │
-#       ▼  podman build
-#   localhost:5000/moodle-apache:5.1-k3s-raid  (en registry local)
-#       │
-#       ▼  containerd pull (automático al crear pods)
-#   Pod moodle-xxx en K3s
-#
-# CAMBIOS RESPECTO A VERSIÓN ANTERIOR:
-#   - Tag de imagen cambiado de "moodle-apache:5.1-k3s-raid"
-#     a "localhost:5000/moodle-apache:5.1-k3s-raid"
-#   - Se añade paso de push al registry local después del build
-#   - Se verifica que el registry esté disponible antes de construir
-#   - Se elimina el paso de importación manual a containerd
-#     (ya no es necesario — K3s hace pull desde el registry)
-#
-# USO:
-#   chmod +x 05-build-image.sh
-#   ./05-build-image.sh
-#
-#   Variables de entorno opcionales:
-#     BUILD_CONTEXT="/ruta/al/contexto"   # directorio con el Dockerfile
-#     DOCKERFILE="Dockerfile.custom"       # nombre del Dockerfile
-#     NO_CACHE=true                        # construir sin cache de capas
-#
-# REQUISITOS:
-#   - Podman instalado
-#   - Registry local corriendo en localhost:5000 (02-setup-registry.sh)
-#   - Dockerfile y contexto de build disponibles
-#   - Ejecutar como root
-#
-# AUTOR: Infraestructura TESOEM
-# VERSIÓN: 2.0 (con registry local)
 # ============================================================================
 
 set -euo pipefail
@@ -239,7 +199,7 @@ echo -e "    ${CYAN}curl http://localhost:5000/v2/_catalog${NC}"
 echo -e "    ${CYAN}curl http://localhost:5000/v2/moodle-apache/tags/list${NC}"
 echo ""
 echo -e "  ${BOLD}Próximo paso — desplegar Moodle:${NC}"
-echo -e "    ${CYAN}./06-deploy-all.sh${NC}"
+echo -e "    ${CYAN}./04-deploy-all.sh${NC}"
 echo ""
 echo -e "  Completado — $(date '+%Y-%m-%d %H:%M:%S')"
 echo ""
