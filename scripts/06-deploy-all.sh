@@ -674,7 +674,7 @@ type: Opaque
 stringData:
   mariadb-root-password: "@@Ad1v1na#2@@"
   mariadb-password: "@@Ad1v1na#2@@"
-  mariadb-galera-mariabackup-password: "@@Ad1v1na#2@@"
+  mariadb-galera-mariabackup-password: "Ad1v1naGalera"
 ---
 apiVersion: v1
 kind: Secret
