@@ -476,6 +476,9 @@ EOF
     if [ "${ARCH}" = "aarch64" ]; then
 	# En Raspberry Pi (incluido AlmaLinux para Pi), el arranque usa cmdline.txt,
 	# no GRUB. Hay que habilitar el cgroup de memoria que K3s requiere.
+	echo 'export PATH="$PATH:/usr/local/bin"' >> /root/.bashrc
+	source /root/.bashrc
+	
 	CMDLINE="/boot/cmdline.txt"
 	[ -f "${CMDLINE}" ] || CMDLINE="/boot/firmware/cmdline.txt"
 
@@ -576,7 +579,7 @@ ENTRYPOINT_EOF
     # Importar al containerd de k3s (sin pasar por registry)
     log_sub "Importando imagen al containerd de k3s..."
     podman save --format docker-archive "${GARBD_IMAGE}" -o "${BUILD_DIR}/garbd.tar"
-    /usr/local/bin/k3s ctr images import "${BUILD_DIR}/garbd.tar"
+    k3s ctr images import "${BUILD_DIR}/garbd.tar"
 
     rm -rf "${BUILD_DIR}"
     log_ok "Imagen garbd lista en la Pi: ${GARBD_IMAGE}"
