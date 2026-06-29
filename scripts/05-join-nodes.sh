@@ -572,8 +572,7 @@ set -- --group "${GALERA_GROUP}" --address "${GALERA_ADDRESS}" --log /dev/stdout
 exec garbd "$@"
 ENTRYPOINT_EOF
 
-    GALERA_SHORT="${GALERA_VERSION#26.}"   # 26.4.23 → 4.23 (forma que reporta garbd --version)
-    podman build --build-arg GALERA_VERSION="${GALERA_VERSION}" --build-arg GALERA_VERSION_SHORT="${GALERA_SHORT}" -t "${GARBD_IMAGE}" "${BUILD_DIR}"
+    podman build -t "${GARBD_IMAGE}" "${BUILD_DIR}"
     
     # Importar al containerd de k3s (sin pasar por registry)
     log_sub "Importando imagen al containerd de k3s..."
