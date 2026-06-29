@@ -575,9 +575,6 @@ ENTRYPOINT_EOF
     GALERA_SHORT="${GALERA_VERSION#26.}"   # 26.4.23 → 4.23 (forma que reporta garbd --version)
     podman build --build-arg GALERA_VERSION="${GALERA_VERSION}" --build-arg GALERA_VERSION_SHORT="${GALERA_SHORT}" -t "${GARBD_IMAGE}" "${BUILD_DIR}"
     
-    # Build arm64 nativo
-    podman build --build-arg GALERA_VERSION="${GALERA_VERSION}" -t "${GARBD_IMAGE}" "${BUILD_DIR}"
-
     # Importar al containerd de k3s (sin pasar por registry)
     log_sub "Importando imagen al containerd de k3s..."
     podman save --format docker-archive "${GARBD_IMAGE}" -o "${BUILD_DIR}/garbd.tar"
