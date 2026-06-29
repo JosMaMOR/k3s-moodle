@@ -1,0 +1,26 @@
+# Containerfile — árbitro Galera (garbd) para la Pi (arm64)
+# Imagen mínima: solo el binario garbd, versión idéntica al clúster.
+FROM debian:12-slim
+
+# DEBE coincidir exacto con la versión de Galera del clúster (cluster.env)
+ARG GALERA_VERSION=26.4.23
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends galera-arbitrator-4; \
+    rm -rf /var/lib/apt/lists/*; \
+    # Verifica que la versión instalada coincide con el clúster
+    garbd --version 2>&1 | grep -q "${GALERA_VERSION}" || { \
+      echo "ERROR: garbd instalado NO es ${GALERA_VERSION}:"; \
+      garbd --version; \
+      echo "Si bookworm trae otra 26.4.x, añade el repo de MariaDB 12.0 para fijar la versión."; \
+      exit 1; \
+    }
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Puerto gcomm (comunicación del grupo Galera)
+EXPOSE 4567/tcp
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

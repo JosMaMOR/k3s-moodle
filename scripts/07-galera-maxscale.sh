@@ -136,6 +136,65 @@ verify_galera_cluster() {
   done
 }
 
+# ── garbd: árbitro en la Pi (voto impar para el quórum) ───────────────────────
+deploy_garbd() {
+  log_sub "Desplegando garbd (árbitro) en la Pi..."
+
+  # El clúster debe estar sano en 2 antes de añadir el árbitro
+  local size
+  size=$(get_cluster_size)
+  [ "$size" = "2" ] || die "El clúster debe estar en 2 antes de garbd (actual: ${size})."
+
+  cat > garbd-deployment.yaml << EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: garbd
+  namespace: ${MOODLE_NS}
+  labels: { app: garbd }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: garbd }
+  template:
+    metadata:
+      labels: { app: garbd }
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: ${NODE_PI}
+      containers:
+        - name: garbd
+          image: ${GARBD_IMAGE}
+          imagePullPolicy: Never
+          env:
+            - name: GALERA_GROUP
+              value: "${GALERA_CLUSTER_NAME}"
+            - name: GALERA_ADDRESS
+              value: "gcomm://mariadb-headless.${MOODLE_NS}.svc.cluster.local:4567"
+          ports:
+            - { containerPort: 4567, name: gcomm }
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits:   { cpu: "200m", memory: "128Mi" }
+EOF
+
+  kubectl apply -f garbd-deployment.yaml
+  log_ok "Deployment de garbd aplicado."
+
+  log_sub "Esperando a que garbd se una (wsrep_cluster_size = 3)..."
+  local retries=0 max=30
+  while true; do
+    size=$(get_cluster_size)
+    if [ "$size" = "3" ]; then
+      log_ok "garbd unido: wsrep_cluster_size = 3 (2 datos + árbitro)."
+      return 0
+    fi
+    retries=$((retries+1))
+    [ "$retries" -ge "$max" ] && die "garbd no se unió (size: ${size}). ¿Construyó el 05 la imagen en la Pi? Revisa: kubectl describe pod -l app=garbd -n ${MOODLE_NS}"
+    echo -n "."; sleep 5
+  done
+}
+
 # ── Orquestación ──────────────────────────────────────────────────────────────
 main() {
   require_root
@@ -154,7 +213,8 @@ main() {
   verify_galera_cluster
 
   log_step "Galera de 2 nodos operativo"
-  log_info "Siguiente: garbd (árbitro) en la Pi para el voto impar, y luego MaxScale."
+  log_info "Siguiente: garbd (árbitro) en la Pi para el voto impar."
+  deploy_garbd
 }
 
 main "$@"

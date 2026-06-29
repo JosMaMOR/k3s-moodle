@@ -536,6 +536,54 @@ register_longhorn_node() {
   log_ok "${NODE_NAME} listo: el manager y las réplicas ya pueden programarse aquí."
 }
 
+create_garbd_raspberry(){
+    # ── Construcción del árbitro garbd (solo en la Pi / aarch64) ──────────────────
+    log_sub "Nodo aarch64 (Pi) — construyendo imagen de garbd ${GALERA_VERSION}..."
+
+    # podman para el build (AlmaLinux)
+    command -v podman >/dev/null 2>&1 || { log_sub "Instalando podman..."; dnf install -y podman; }
+
+    BUILD_DIR="$(mktemp -d)"
+
+    cat > "${BUILD_DIR}/Containerfile" << 'CONTAINERFILE_EOF'
+FROM debian:12-slim
+ARG GALERA_VERSION=26.4.23
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends galera-arbitrator-4; \
+    rm -rf /var/lib/apt/lists/*; \
+    garbd --version 2>&1 | grep -q "${GALERA_VERSION}" || { \
+      echo "ERROR: garbd instalado NO es ${GALERA_VERSION}:"; garbd --version; exit 1; }
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+EXPOSE 4567/tcp
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CONTAINERFILE_EOF
+
+    cat > "${BUILD_DIR}/entrypoint.sh" << 'ENTRYPOINT_EOF'
+#!/bin/sh
+set -eu
+: "${GALERA_GROUP:?Falta GALERA_GROUP}"
+: "${GALERA_ADDRESS:?Falta GALERA_ADDRESS}"
+echo "[garbd] Grupo:     ${GALERA_GROUP}"
+echo "[garbd] Dirección: ${GALERA_ADDRESS}"
+set -- --group "${GALERA_GROUP}" --address "${GALERA_ADDRESS}" --log /dev/stdout
+[ -n "${GALERA_OPTIONS:-}" ] && set -- "$@" --options "${GALERA_OPTIONS}"
+exec garbd "$@"
+ENTRYPOINT_EOF
+
+    # Build arm64 nativo
+    podman build --build-arg GALERA_VERSION="${GALERA_VERSION}" -t "${GARBD_IMAGE}" "${BUILD_DIR}"
+
+    # Importar al containerd de k3s (sin pasar por registry)
+    log_sub "Importando imagen al containerd de k3s..."
+    podman save --format docker-archive "${GARBD_IMAGE}" -o "${BUILD_DIR}/garbd.tar"
+    k3s ctr images import "${BUILD_DIR}/garbd.tar"
+
+    rm -rf "${BUILD_DIR}"
+    log_ok "Imagen garbd lista en la Pi: ${GARBD_IMAGE}"
+}
+
 main(){
     require_root
     show_banner
@@ -545,6 +593,9 @@ main(){
     prepare_node
     node_join
     register_longhorn_node
+    if [ "$(uname -m)" = "aarch64" ]; then
+	create_garbd_raspberry
+    fi
 
 echo ""
 echo "========================================================="
