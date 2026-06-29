@@ -576,7 +576,7 @@ ENTRYPOINT_EOF
     # Importar al containerd de k3s (sin pasar por registry)
     log_sub "Importando imagen al containerd de k3s..."
     podman save --format docker-archive "${GARBD_IMAGE}" -o "${BUILD_DIR}/garbd.tar"
-    /var/lib/k3s ctr images import "${BUILD_DIR}/garbd.tar"
+    /usr/local/bin/k3s ctr images import "${BUILD_DIR}/garbd.tar"
 
     rm -rf "${BUILD_DIR}"
     log_ok "Imagen garbd lista en la Pi: ${GARBD_IMAGE}"
