@@ -53,6 +53,16 @@ check_command() {
   command -v "$1" &>/dev/null
 }
 
+CLUSTER_ENV="./cluster.env"
+if [ -f "${CLUSTER_ENV}" ]; then
+  source "${CLUSTER_ENV}"
+  log_info "cluster.env cargado: VIP=${CLUSTER_VIP}, nodo=${NODE_A_IP}"
+else
+  log_err "No se encontró ${CLUSTER_ENV} — requerido para configurar la red del clúster."
+  exit 1
+fi
+
+
 # ── Config Galera ─────────────────────────────────────────────────────────────
 GALERA_RELEASE="mariadb"
 GALERA_CHART="oci://registry-1.docker.io/bitnamicharts/mariadb-galera"
@@ -135,7 +145,6 @@ verify_galera_cluster() {
     sleep 10
   done
 }
-GARBD_IMAGE="localhost/galera-arbitrator:${GALERA_VERSION}"
 # ── garbd: árbitro en la Pi (voto impar para el quórum) ───────────────────────
 deploy_garbd() {
   log_sub "Desplegando garbd (árbitro) en la Pi..."
