@@ -138,6 +138,7 @@ verify_galera_cluster() {
 
 # ── garbd: árbitro en la Pi (voto impar para el quórum) ───────────────────────
 deploy_garbd() {
+  GARBD_IMAGE="localhost/galera-arbitrator:${GALERA_VERSION}"
   log_sub "Desplegando garbd (árbitro) en la Pi..."
 
   # El clúster debe estar sano en 2 antes de añadir el árbitro
