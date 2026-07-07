@@ -194,7 +194,7 @@ prepare_storage() {
     log_sub "Creando estructura de directorios..."
     mkdir -p "${RAID_BASE}/galera"
     mkdir -p "${RAID_BASE}/redis"
-    mkdir -P "${RAID_BASE}/longhorn"
+    mkdir -p "${RAID_BASE}/longhorn"
     log_ok "Directorios creados en ${RAID_BASE}/"
 
     # Permisos — deben coincidir con los UIDs de los contenedores:
