@@ -229,6 +229,7 @@ kubectl annotate node ${NODE_NAME} node.longhorn.io/default-node-tags='["storage
 echo "[*] Preparando directorios en RAID (solo MariaDB y Redis)..."
 mkdir -p ${RAID_BASE}/galera
 mkdir -p ${RAID_BASE}/redis
+mkdir -p ${RAID_BASE}/longhorn
 
 # Permisos por servicio — cada imagen corre con un uid distinto:
 #   uid 999  → mariadb:lts      (usuario interno: mysql) [Debian - auto-inicializa]
