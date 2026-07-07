@@ -478,7 +478,8 @@ EOF
 	# En Raspberry Pi (incluido AlmaLinux para Pi), el arranque usa cmdline.txt,
 	# no GRUB. Hay que habilitar el cgroup de memoria que K3s requiere.
 	echo 'export PATH="$PATH:/usr/local/bin"' >> ~/.bashrc
-	source ~/.bashrc
+	# Probablemente haya que hacer esto manualmente
+	#source ~/.bashrc
 	
 	CMDLINE="/boot/cmdline.txt"
 	[ -f "${CMDLINE}" ] || CMDLINE="/boot/firmware/cmdline.txt"
