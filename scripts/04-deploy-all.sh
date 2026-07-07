@@ -112,6 +112,7 @@ metadata:
   namespace: longhorn-system
 data:
   default-setting.yaml: |-
+    create-default-disk-labeled-nodes: "true"
     priority-class: "longhorn-critical"
     disable-revision-counter: "{\"v1\":\"true\"}"
     system-managed-components-node-selector: "tesoem.edu.mx/longhorn-node:true"
@@ -130,7 +131,7 @@ EOF
     # CRÍTICO: la label en A va ANTES del apply. Si el manager tiene nodeSelector
     # y ningún nodo la tiene, el DaemonSet queda en desired=0 y el rollout
     # "pasaría" con cero pods → Longhorn no arrancaría.
-    kubectl label node ${NODE_NAME} tesoem.edu.mx/longhorn-node=true --overwrite
+    kubectl label node ${NODE_NAME} tesoem.edu.mx/longhorn-node=true node.longhorn.io/create-default-disk=config --overwrite
 
     kubectl apply -k "${LH_DIR}/"
 

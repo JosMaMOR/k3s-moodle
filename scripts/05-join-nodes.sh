@@ -535,7 +535,7 @@ register_longhorn_node() {
     node.longhorn.io/default-disks-config='[{"path":"/moodlek3s/longhorn","allowScheduling":true,"storageReserved":0,"tags":["storage"]}]' --overwrite
   kubectl annotate node "${NODE_NAME}" \
     node.longhorn.io/default-node-tags='["storage"]' --overwrite
-  kubectl label node "${NODE_NAME}" tesoem.edu.mx/longhorn-node=true --overwrite
+  kubectl label node "${NODE_NAME}" tesoem.edu.mx/longhorn-node=true node.longhorn.io/create-default-disk=config --overwrite
   log_ok "${NODE_NAME} listo: el manager y las réplicas ya pueden programarse aquí."
 }
 
