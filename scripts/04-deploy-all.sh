@@ -522,7 +522,7 @@ data:
   MOODLE_VERSION: "5.1.3"
 
   # MariaDB
-  MARIADB_HOST: "mariadb"
+  MARIADB_HOST: "maxscale"
   MARIADB_PORT: "3306"
   MARIADB_DATABASE: "moodle"
   MARIADB_USER: "moodleTESOEM"
@@ -530,7 +530,7 @@ data:
   MARIADB_COLLATE: "utf8mb4_unicode_ci"
 
   # Moodle DB
-  MOODLE_DB_HOST: "mariadb"
+  MOODLE_DB_HOST: "maxscale"
   MOODLE_DB_PORT: "3306"
   MOODLE_DB_NAME: "moodle"
   MOODLE_DB_USER: "moodleTESOEM"
@@ -550,7 +550,7 @@ data:
   #MOODLE_DIRROOT: "/var/www/html/public"
   # DB install
   DB_TYPE: "mariadb"
-  DB_HOST: "mariadb"
+  DB_HOST: "maxscale"
   DB_PORT: "3306"
   DB_NAME: "moodle"
   DB_USER: "moodleTESOEM"
@@ -705,6 +705,247 @@ helm upgrade --install mariadb oci://registry-1.docker.io/bitnamicharts/mariadb-
 
 echo "[*] Esperando que Galera quede listo (hasta 600s)..."
 kubectl rollout status statefulset/mariadb -n moodle-prod --timeout=600s
+
+# ==========================================
+# 7.5 MAXSCALE — CAPA DE ACCESO A DATOS
+# ==========================================
+# Se despliega DESPUÉS de que Galera está Ready y ANTES de Moodle,
+# para que config.php nazca apuntando al endpoint definitivo (maxscale)
+# y nunca haya reconfiguración de la aplicación.
+#
+# La topología completa (mariadb-0 y mariadb-1) se declara desde el día uno
+# aunque mariadb-1 aún no exista: galeramon lo marcará Down y lo promoverá
+# solo cuando el 07 escale Galera. Esta primera corrida ES la prueba de que
+# MaxScale tolera un hostname irresoluble al arranque.
+echo "[*] Desplegando MaxScale (capa de acceso a datos)..."
+
+MAXSCALE_IMAGE="mariadb/maxscale:24.02"   # LTS; fija el patch exacto tras validar (ver nota)
+MAXSCALE_USER="maxscale"
+MAXSCALE_PASSWORD="@@Ad1v1na#2@@"         # mismo esquema de credenciales del proyecto
+
+# ── 7.5.1 Usuario de MaxScale en Galera ──────────────────────────────────────
+# DOS capas de permisos en el mismo usuario:
+#   - REPLICA MONITOR → galeramon lee el estado de replicación/wsrep
+#   - SELECT itemizado sobre mysql.* → readwritesplit construye su caché de
+#     autenticación de usuarios (sin esto: "Authentication failed" a los clientes)
+# Idempotente: IF NOT EXISTS + ALTER para fijar el password en re-ejecuciones.
+echo "[*] Creando usuario '${MAXSCALE_USER}'@'%' en Galera..."
+
+MARIADB_ROOT_PW=$(kubectl get secret mariadb-secrets -n moodle-prod \
+  -o jsonpath='{.data.mariadb-root-password}' | base64 -d)
+
+kubectl exec -i mariadb-0 -n moodle-prod -- \
+  mariadb -u root -p"${MARIADB_ROOT_PW}" <<SQL
+CREATE USER IF NOT EXISTS '${MAXSCALE_USER}'@'%' IDENTIFIED BY '${MAXSCALE_PASSWORD}';
+ALTER USER '${MAXSCALE_USER}'@'%' IDENTIFIED BY '${MAXSCALE_PASSWORD}';
+GRANT REPLICA MONITOR ON *.* TO '${MAXSCALE_USER}'@'%';
+GRANT SHOW DATABASES ON *.* TO '${MAXSCALE_USER}'@'%';
+GRANT SELECT ON mysql.user          TO '${MAXSCALE_USER}'@'%';
+GRANT SELECT ON mysql.db            TO '${MAXSCALE_USER}'@'%';
+GRANT SELECT ON mysql.tables_priv   TO '${MAXSCALE_USER}'@'%';
+GRANT SELECT ON mysql.columns_priv  TO '${MAXSCALE_USER}'@'%';
+GRANT SELECT ON mysql.procs_priv    TO '${MAXSCALE_USER}'@'%';
+GRANT SELECT ON mysql.proxies_priv  TO '${MAXSCALE_USER}'@'%';
+GRANT SELECT ON mysql.roles_mapping TO '${MAXSCALE_USER}'@'%';
+FLUSH PRIVILEGES;
+SQL
+
+echo "[*] ✓ Usuario maxscale creado con grants de monitor + auth-cache."
+
+# ── 7.5.2 Configuración de MaxScale (Secret, no ConfigMap) ───────────────────
+# Va en Secret porque el .cnf contiene el password del monitor.
+# NOTA heredoc SIN comillas: expande ${MAXSCALE_USER}/${MAXSCALE_PASSWORD}.
+# Decisiones anotadas:
+#   - disable_master_failback=true → cuando el master original se recupera,
+#     NO se fuerza un switch de vuelta; se evita un evento de reconexión extra.
+#   - available_when_donor=true → con solo 2 nodos de datos, durante un SST el
+#     donante es el único nodo útil; mariabackup (el método del chart) no
+#     bloquea al donante, así que es seguro seguir sirviendo desde él.
+#   - master_reconnection=true → las sesiones sobreviven un cambio de master
+#     reconectándose en lugar de cerrarse.
+#   - log_info=true → verboso a propósito para la primera corrida: aquí se ve
+#     exactamente cómo reporta el DNS irresoluble de mariadb-1. Bajar a false
+#     cuando el comportamiento esté validado.
+cat > 25-maxscale-config.yaml << EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: maxscale-config
+  namespace: moodle-prod
+type: Opaque
+stringData:
+  maxscale.cnf: |
+    [maxscale]
+    threads=auto
+    log_info=true
+
+    [mariadb-0]
+    type=server
+    address=mariadb-0.mariadb-headless.moodle-prod.svc.cluster.local
+    port=3306
+
+    [mariadb-1]
+    type=server
+    address=mariadb-1.mariadb-headless.moodle-prod.svc.cluster.local
+    port=3306
+
+    [Galera-Monitor]
+    type=monitor
+    module=galeramon
+    servers=mariadb-0,mariadb-1
+    user=${MAXSCALE_USER}
+    password=${MAXSCALE_PASSWORD}
+    monitor_interval=2s
+    disable_master_failback=true
+    available_when_donor=true
+
+    [RW-Service]
+    type=service
+    router=readwritesplit
+    servers=mariadb-0,mariadb-1
+    user=${MAXSCALE_USER}
+    password=${MAXSCALE_PASSWORD}
+    master_reconnection=true
+
+    [RW-Listener]
+    type=listener
+    service=RW-Service
+    protocol=MariaDBClient
+    address=0.0.0.0
+    port=3306
+EOF
+
+kubectl apply -f 25-maxscale-config.yaml
+
+# ── 7.5.3 Deployment + Service ───────────────────────────────────────────────
+# replicas: 1 en el 04 (todo el sistema es single-node en este punto).
+# El 07 solo cambia replicas 1 → 2; por eso la anti-affinity YA está escrita
+# (con 1 réplica se satisface trivialmente) y la nodeAffinity por arquitectura
+# excluye la Pi de forma declarativa: expresa el POR QUÉ (arm64 sin imagen),
+# no solo el dónde.
+cat > 26-maxscale.yaml << EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maxscale
+  namespace: moodle-prod
+  labels:
+    app: maxscale
+    tier: data-access
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: maxscale
+  template:
+    metadata:
+      labels:
+        app: maxscale
+        tier: data-access
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/arch
+                    operator: In
+                    values: ["amd64"]
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: maxscale
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: maxscale
+          image: ${MAXSCALE_IMAGE}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3306
+              name: mariadb
+            - containerPort: 8989
+              name: admin
+          volumeMounts:
+            - name: config
+              mountPath: /etc/maxscale.cnf
+              subPath: maxscale.cnf
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: 3306
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 3306
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+      volumes:
+        - name: config
+          secret:
+            secretName: maxscale-config
+            defaultMode: 0444
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: maxscale
+  namespace: moodle-prod
+  labels:
+    app: maxscale
+spec:
+  type: ClusterIP
+  selector:
+    app: maxscale
+  ports:
+    - name: mariadb
+      port: 3306
+      targetPort: 3306
+EOF
+
+kubectl apply -f 26-maxscale.yaml
+
+# ── 7.5.4 Verificación fuerte: esperar Master en galeramon ───────────────────
+# Equivalente al patrón get_cluster_size: la readiness probe TCP solo dice que
+# el listener abrió; ESTO confirma que galeramon ve a mariadb-0 como
+# "Master, Synced, Running" antes de dejar pasar a Moodle.
+echo -n "[*] Esperando que MaxScale marque mariadb-0 como Master"
+MAXSCALE_TIMEOUT=180
+ELAPSED=0
+until kubectl exec deploy/maxscale -n moodle-prod -- \
+        maxctrl list servers --tsv 2>/dev/null \
+        | awk -F'\t' '$1=="mariadb-0"' | grep -q "Master"; do
+    sleep 5
+    ELAPSED=$((ELAPSED + 5))
+    echo -n "."
+    if [ $ELAPSED -ge $MAXSCALE_TIMEOUT ]; then
+        echo ""
+        echo "  ╔══════════════════════════════════════════════════════════════╗"
+        echo "  ║  TIMEOUT: MaxScale no marcó mariadb-0 como Master             ║"
+        echo "  ║  Revisa: kubectl logs deploy/maxscale -n moodle-prod          ║"
+        echo "  ║  Y:      kubectl exec deploy/maxscale -n moodle-prod --       ║"
+        echo "  ║              maxctrl list servers                             ║"
+        echo "  ╚══════════════════════════════════════════════════════════════╝"
+        exit 1
+    fi
+done
+echo " OK"
+
+echo "[*] Estado de servidores según MaxScale:"
+kubectl exec deploy/maxscale -n moodle-prod -- maxctrl list servers || true
+
+# mariadb-1 debe aparecer Down (aún no existe) SIN impedir que mariadb-0 sea
+# Master ni que el servicio arranque. Ese es el veredicto de la arquitectura:
+# si MaxScale llegó aquí, tolera la topología declarada por adelantado.
+echo "[*] ✓ MaxScale operativo — mariadb-1 en Down es lo ESPERADO hasta el 07."
 
 # ==========================================
 # 8. REDIS DEPLOYMENT

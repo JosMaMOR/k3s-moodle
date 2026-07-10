@@ -207,7 +207,7 @@ ok "[1/9] PHP OK"
 # ============================================================
 log "[2/9] Configurando variables..."
 
-: "${MARIADB_HOST:=mariadb}"
+: "${MARIADB_HOST:=maxscale}"
 : "${MARIADB_PORT:=3306}"
 : "${MARIADB_DATABASE:=moodle}"
 : "${MARIADB_USER:=moodle}"

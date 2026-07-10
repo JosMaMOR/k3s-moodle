@@ -204,6 +204,12 @@ EOF
   done
 }
 
+scale_maxscale(){
+    log_sub "Escalando replicas de maxscale a 2."
+    kubectl scale deployment/maxscale -n moodle-prod --replicas=2 || die "Problema para escalar replicas de maxscale"
+    kubectl rollout status deployment/maxscale -n moodle-prod --timeout=120s
+}
+
 # ── Orquestación ──────────────────────────────────────────────────────────────
 main() {
   require_root
