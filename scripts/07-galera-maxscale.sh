@@ -130,7 +130,7 @@ scale_galera() {
 # ── Verificar que el clúster quedó en 2 (bucle con timeout) ───────────────────
 verify_galera_cluster() {
   log_sub "Esperando wsrep_cluster_size = 2 (el SST puede tardar varios minutos)..."
-  local retries=0 max=90 size   # 90 * 10s = 900s
+  local retries=0 max=180 size   # 180 * 10s = 30min
   while true; do
     size=$(get_cluster_size)
     if [ "$size" = "2" ]; then
@@ -191,7 +191,7 @@ EOF
   log_ok "Deployment de garbd aplicado."
 
   log_sub "Esperando a que garbd se una (wsrep_cluster_size = 3)..."
-  local retries=0 max=30
+  local retries=0 max=90
   while true; do
     size=$(get_cluster_size)
     if [ "$size" = "3" ]; then
@@ -207,7 +207,7 @@ EOF
 scale_maxscale(){
     log_sub "Escalando replicas de maxscale a 2."
     kubectl scale deployment/maxscale -n moodle-prod --replicas=2 || die "Problema para escalar replicas de maxscale"
-    kubectl rollout status deployment/maxscale -n moodle-prod --timeout=120s
+    kubectl rollout status deployment/maxscale -n moodle-prod --timeout=240s
 }
 
 # ── Orquestación ──────────────────────────────────────────────────────────────

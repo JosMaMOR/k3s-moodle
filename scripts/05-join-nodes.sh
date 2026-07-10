@@ -525,7 +525,7 @@ register_longhorn_node() {
   local n=0
   until kubectl get node "${NODE_NAME}" >/dev/null 2>&1; do
     sleep 5; n=$((n+1))
-    [ $n -ge 24 ] && die "El nodo ${NODE_NAME} no se registró en 120s."
+    [ $n -ge 72 ] && die "El nodo ${NODE_NAME} no se registró en 6min."
   done
 
   # ORDEN IMPORTANTE: el disco y el tag van ANTES que la label.

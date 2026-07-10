@@ -145,8 +145,8 @@ EOF
     until kubectl get daemonset/longhorn-manager -n ${LONGHORN_NAMESPACE} >/dev/null 2>&1; do
       sleep 5
       RETRIES=$((RETRIES+1))
-      if [ $RETRIES -ge 30 ]; then
-        echo "  ERROR: el DaemonSet longhorn-manager no apareció en 60s"
+      if [ $RETRIES -ge 90 ]; then
+        echo "  ERROR: el DaemonSet longhorn-manager no apareció en 3min"
         exit 1
       fi
     done
@@ -160,12 +160,12 @@ EOF
     # install es lo que realmente tarda.
     kubectl wait --for=condition=ready pod \
         -l app=longhorn-manager \
-        -n ${LONGHORN_NAMESPACE} --timeout=600s 2>/dev/null || true
+        -n ${LONGHORN_NAMESPACE} --timeout=1200s 2>/dev/null || true
 
     # El rollout status confirma el estado final del DaemonSet. Timeout corto
     # porque a este punto las imágenes ya bajaron....
     if ! kubectl rollout status daemonset/longhorn-manager \
-         -n ${LONGHORN_NAMESPACE} --timeout=120s; then
+         -n ${LONGHORN_NAMESPACE} --timeout=240s; then
       echo ""
       echo "  ╔══════════════════════════════════════════════════════════════╗"
       echo "  ║  ERROR: longhorn-manager no completó el rollout              ║"
@@ -184,16 +184,16 @@ echo "    (La primera instalación descarga imágenes; puede tardar 1-5 min)"
 echo "    → Esperando pods longhorn-csi-plugin..."
 if kubectl wait --for=condition=ready pod \
         -l app=longhorn-csi-plugin \
-        -n "${LONGHORN_NAMESPACE}" --timeout=600s 2>/dev/null; then
+        -n "${LONGHORN_NAMESPACE}" --timeout=1200s 2>/dev/null; then
     echo "    ✓ Pods CSI listos"
 else
-    echo "    ⚠ Los pods CSI tardaron más de 600s — revisa 'kubectl get pods -n ${LONGHORN_NAMESPACE}'"
+    echo "    ⚠ Los pods CSI tardaron más de 20min — revisa 'kubectl get pods -n ${LONGHORN_NAMESPACE}'"
 fi
 
 # 2) El driver-deployer es quien registra el csidriver
 echo "    → Esperando longhorn-driver-deployer..."
 kubectl rollout status deployment/longhorn-driver-deployer \
-    -n "${LONGHORN_NAMESPACE}" --timeout=300s 2>/dev/null || true
+    -n "${LONGHORN_NAMESPACE}" --timeout=900s 2>/dev/null || true
 
 # 3) Confirmación final del csidriver (a estas alturas ya debe existir casi al instante)
 echo "    → Verificando registro del CSI driver..."
@@ -201,7 +201,7 @@ RETRIES=0
 until kubectl get csidriver driver.longhorn.io >/dev/null 2>&1; do
     sleep 5
     RETRIES=$((RETRIES+1))
-    [ $RETRIES -ge 24 ] && { echo "  ERROR: CSI driver no se registró tras esperar componentes"; exit 1; }
+    [ $RETRIES -ge 72 ] && { echo "  ERROR: CSI driver no se registró tras esperar componentes"; exit 1; }
 done
 echo "[*] ✓ Longhorn instalado y CSI driver registrado."
 
@@ -496,8 +496,8 @@ for PVC in redis-pvc moodle-html-pvc moodle-data-pvc; do
   until kubectl get pvc "$PVC" -n moodle-prod -o jsonpath='{.status.phase}' 2>/dev/null | grep -q "Bound"; do
     sleep 3
     RETRIES=$((RETRIES+1))
-    if [ $RETRIES -ge 80 ]; then
-      echo " ERROR: $PVC no llegó a Bound en 240s"
+    if [ $RETRIES -ge 240 ]; then
+      echo " ERROR: $PVC no llegó a Bound en 12min"
       kubectl describe pvc "$PVC" -n moodle-prod
       exit 1
     fi
@@ -703,8 +703,8 @@ helm upgrade --install mariadb oci://registry-1.docker.io/bitnamicharts/mariadb-
   --namespace moodle-prod \
   -f galera-values.yaml
 
-echo "[*] Esperando que Galera quede listo (hasta 600s)..."
-kubectl rollout status statefulset/mariadb -n moodle-prod --timeout=600s
+echo "[*] Esperando que Galera quede listo (hasta 20min)..."
+kubectl rollout status statefulset/mariadb -n moodle-prod --timeout=1200s
 
 # ==========================================
 # 7.5 MAXSCALE — CAPA DE ACCESO A DATOS
@@ -918,7 +918,7 @@ kubectl apply -f 26-maxscale.yaml
 # el listener abrió; ESTO confirma que galeramon ve a mariadb-0 como
 # "Master, Synced, Running" antes de dejar pasar a Moodle.
 echo -n "[*] Esperando que MaxScale marque mariadb-0 como Master"
-MAXSCALE_TIMEOUT=180
+MAXSCALE_TIMEOUT=360
 ELAPSED=0
 until kubectl exec deploy/maxscale -n moodle-prod -- \
         maxctrl list servers --tsv 2>/dev/null \
@@ -1057,8 +1057,8 @@ EOF
 
 kubectl apply -f 21-redis.yaml
 
-echo "[*] Esperando Redis (hasta 120s)..."
-kubectl rollout status deployment/redis -n moodle-prod --timeout=120s
+echo "[*] Esperando Redis (hasta 4min)..."
+kubectl rollout status deployment/redis -n moodle-prod --timeout=240s
 
 # ==========================================
 # 9. MOODLE DEPLOYMENT (3 RÉPLICAS)
@@ -1478,7 +1478,7 @@ echo "    kubectl logs -f -l app=moodle -n moodle-prod -c moodle"
 echo ""
 
 # Esperar a que el pod único esté Ready (la readiness probe pase)
-INSTALL_TIMEOUT=600
+INSTALL_TIMEOUT=1200
 ELAPSED=0
 INTERVAL=5
 echo -n "[*] Esperando pod Ready"

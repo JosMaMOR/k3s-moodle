@@ -201,7 +201,7 @@ deploy_kube_vip() {
 #   (3) API server responde por la VIP (401/200 = sano; 000/503 = no)
 verify_kube_vip() {
   log_sub "Verificando que kube-vip esté operativo"
-  local expected=3 timeout=120 interval=5 elapsed=0
+  local expected=3 timeout=1200 interval=5 elapsed=0
   local ds_ready lease_holder http_code
 
   while true; do
@@ -259,7 +259,7 @@ verify_storage_baseline() {
 # es 2— y (b) ESPERAMOS la convergencia: robustness=healthy y réplicas en 2 nodos.
 ensure_longhorn_ha() {
   log_sub "Asegurando 2 réplicas por volumen, distribuidas en A y B"
-  local pvc vol robustness rep_nodes timeout=300 interval=10 elapsed
+  local pvc vol robustness rep_nodes timeout=900 interval=10 elapsed
 
   for pvc in ${MOODLE_PVCS}; do
     vol=$(kubectl -n "${MOODLE_NS}" get pvc "${pvc}" -o jsonpath='{.spec.volumeName}' 2>/dev/null)
