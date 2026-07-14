@@ -1478,7 +1478,7 @@ echo "    kubectl logs -f -l app=moodle -n moodle-prod -c moodle"
 echo ""
 
 # Esperar a que el pod único esté Ready (la readiness probe pase)
-INSTALL_TIMEOUT=2400
+INSTALL_TIMEOUT=30000
 ELAPSED=0
 INTERVAL=30000
 echo -n "[*] Esperando pod Ready"
