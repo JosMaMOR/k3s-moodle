@@ -496,7 +496,7 @@ for PVC in redis-pvc moodle-html-pvc moodle-data-pvc; do
   until kubectl get pvc "$PVC" -n moodle-prod -o jsonpath='{.status.phase}' 2>/dev/null | grep -q "Bound"; do
     sleep 3
     RETRIES=$((RETRIES+1))
-    if [ $RETRIES -ge 240 ]; then
+    if [ $RETRIES -ge 400 ]; then
       echo " ERROR: $PVC no llegó a Bound en 12min"
       kubectl describe pvc "$PVC" -n moodle-prod
       exit 1
