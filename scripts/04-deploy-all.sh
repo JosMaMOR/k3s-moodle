@@ -1480,7 +1480,7 @@ echo ""
 # Esperar a que el pod único esté Ready (la readiness probe pase)
 INSTALL_TIMEOUT=2400
 ELAPSED=0
-INTERVAL=10
+INTERVAL=30000
 echo -n "[*] Esperando pod Ready"
 until kubectl get pods -n moodle-prod -l app=moodle       --no-headers 2>/dev/null | grep -q "1/1.*Running"; do
     sleep $INTERVAL
