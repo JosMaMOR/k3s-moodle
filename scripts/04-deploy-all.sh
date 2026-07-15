@@ -1173,7 +1173,7 @@ spec:
           initialDelaySeconds: 30
           periodSeconds: 10
           timeoutSeconds: 5
-          failureThreshold: 30
+          failureThreshold: 420
       volumes:
       - name: moodle-html
         persistentVolumeClaim:
@@ -1478,11 +1478,11 @@ echo "    kubectl logs -f -l app=moodle -n moodle-prod -c moodle"
 echo ""
 
 # Esperar a que el pod único esté Ready (la readiness probe pase)
-INSTALL_TIMEOUT=30000
+INSTALL_TIMEOUT=4500
 ELAPSED=0
-INTERVAL=30000
+INTERVAL=10
 echo -n "[*] Esperando pod Ready"
-until kubectl get pods -n moodle-prod -l app=moodle       --no-headers 2>/dev/null | grep -q "1/1.*Running"; do
+until kubectl get pods -n moodle-prod -l app=moodle --no-headers 2>/dev/null | grep -q "1/1.*Running"; do
     sleep $INTERVAL
     ELAPSED=$((ELAPSED + INTERVAL))
     echo -n "."
