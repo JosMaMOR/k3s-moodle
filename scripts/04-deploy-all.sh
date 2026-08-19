@@ -271,20 +271,22 @@ kubectl apply -f 00-namespace.yaml
 # ── CAMBIO LONGHORN: ahora hay DOS StorageClasses ─────────────────────────────
 #   local-raid      → MariaDB y Redis (almacenamiento local en RAID, sin cambios)
 #   longhorn-moodle → moodle-html y moodle-data (RWX replicado por Longhorn)
+
+# Local-raid solo guardado por si acaso
+# ── StorageClass 1: local-raid (Redis) ───────────────
+#apiVersion: storage.k8s.io/v1
+#kind: StorageClass
+#metadata:
+#  name: local-raid
+#  annotations:
+#    storageclass.kubernetes.io/is-default-class: "false"
+#provisioner: kubernetes.io/no-provisioner
+#volumeBindingMode: Immediate
+#reclaimPolicy: Retain
+
 echo "[*] Creando StorageClass..."
 
 cat > 01-storageclass.yaml << 'EOF'
-# ── StorageClass 1: local-raid (Redis) ───────────────
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: local-raid
-  annotations:
-    storageclass.kubernetes.io/is-default-class: "false"
-provisioner: kubernetes.io/no-provisioner
-volumeBindingMode: Immediate
-reclaimPolicy: Retain
----
 # ── StorageClass 2: local-galera (MariaDB + Galera) ───────────────
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -371,33 +373,6 @@ spec:
         - key: kubernetes.io/hostname
           operator: In
           values: [node-b-k3s-moodle]    # nodo B
----
-# ── PV: Redis ─────────────────────────────────────────────────────────────────
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: redis-pv
-  labels:
-    app: redis
-    tier: cache
-spec:
-  capacity:
-    storage: 2Gi
-  accessModes:
-    - ReadWriteOnce           # Solo un pod (Deployment 1 réplica)
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: local-raid
-  volumeMode: Filesystem
-  local:
-    path: /moodlek3s/redis
-  nodeAffinity:
-    required:
-      nodeSelectorTerms:
-      - matchExpressions:
-        - key: kubernetes.io/hostname
-          operator: In
-          values:
-          - k3s-moodle-master
 EOF
 
 kubectl apply -f 02-persistent-volumes.yaml
@@ -423,25 +398,6 @@ cat > 03-persistent-volume-claims.yaml << 'EOF'
 #   dinámicamente. SIN selector — no hay PV preexistente que emparejar.
 # ----------------------------------------------------------------------------
 
-# ── PVC: Redis ────────────────────────────────────────────────────────────────
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: redis-pvc
-  namespace: moodle-prod
-  labels:
-    app: redis
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: local-raid
-  resources:
-    requests:
-      storage: 2Gi
-  selector:
-    matchLabels:
-      app: redis
----
 # ── PVC: Moodle HTML ──────────────────────────────────────────────────────────
 # FIX v3: matchLabels incluye 'volume: moodle-html' → binding determinístico
 # al PV correcto (10Gi, /moodlek3s/moodle-html), no al de 50Gi de moodle-data.
@@ -490,7 +446,7 @@ kubectl apply -f 03-persistent-volume-claims.yaml
 
 # Verificar que los PVCs queden en estado Bound antes de continuar
 echo "[*] Esperando que los PVCs queden en estado Bound..."
-for PVC in redis-pvc moodle-html-pvc moodle-data-pvc; do
+for PVC in moodle-html-pvc moodle-data-pvc; do
   echo -n "    Esperando $PVC..."
   RETRIES=0
   until kubectl get pvc "$PVC" -n moodle-prod -o jsonpath='{.status.phase}' 2>/dev/null | grep -q "Bound"; do
@@ -959,7 +915,7 @@ echo "[*] Desplegando Redis..."
 
 cat > 21-redis.yaml << 'EOF'
 apiVersion: apps/v1
-kind: Deployment
+kind: DaemonSet
 metadata:
   name: redis
   namespace: moodle-prod
@@ -967,7 +923,6 @@ metadata:
     app: redis
     tier: cache
 spec:
-  replicas: 1
   selector:
     matchLabels:
       app: redis
@@ -977,8 +932,6 @@ spec:
         app: redis
         tier: cache
     spec:
-      nodeSelector:
-        kubernetes.io/hostname: k3s-moodle-master
       containers:
       - name: redis
         image: redis:7-alpine
@@ -1034,8 +987,9 @@ spec:
           failureThreshold: 3
       volumes:
       - name: redis-data
-        persistentVolumeClaim:
-          claimName: redis-pvc
+        emptyDir: {}
+      tolerations:
+      - operator: Exists
 ---
 apiVersion: v1
 kind: Service
@@ -1046,6 +1000,7 @@ metadata:
     app: redis
 spec:
   type: ClusterIP
+  internalTrafficPolicy: Local
   ports:
   - port: 6379
     targetPort: 6379

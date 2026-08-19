@@ -103,14 +103,6 @@ generate_config() {
 
     # Construir config.php completo en un solo bloque
     # El password de Redis se inyecta condicionalmente dentro del heredoc
-    local REDIS_AUTH_SESSION REDIS_AUTH_CACHE
-    if [ -n "${REDIS_PASSWORD:-}" ]; then
-        REDIS_AUTH_SESSION="\$CFG->session_redis_auth = '${REDIS_PASSWORD}';"
-        REDIS_AUTH_CACHE="\$CFG->cachestore_redis_password = '${REDIS_PASSWORD}';"
-    else
-        REDIS_AUTH_SESSION="\$CFG->session_redis_auth = null;"
-        REDIS_AUTH_CACHE="\$CFG->cachestore_redis_password = null;"
-    fi
 
     cat > "${TMP_CFG}" << CFGEOF
 ${CONFIG_BASE}
@@ -133,15 +125,8 @@ ${CONFIG_BASE}
 \$CFG->lang      = '${MOODLE_LANG}';
 \$CFG->langcache = true;
 
-// ── Sesiones en Redis (DB 0) ─────────────────────────────────────────────────
-\$CFG->session_handler_class              = '\\core\\session\\redis';
-\$CFG->session_redis_host                 = '${REDIS_HOST}';
-\$CFG->session_redis_port                 = ${REDIS_PORT};
-\$CFG->session_redis_prefix               = 'moodle_sess_';
-\$CFG->session_redis_acquire_lock_timeout = 120;
-\$CFG->session_redis_lock_expire          = 7200;
-\$CFG->session_redis_database             = 0;
-${REDIS_AUTH_SESSION}
+// ── Sesiones en galera ----- ─────────────────────────────────────────────────
+\$CFG->dbsessions = true;
 
 // ── Caché en Redis (DB 1) ────────────────────────────────────────────────────
 \$CFG->cachestore_redis_server   = '${REDIS_HOST}';
