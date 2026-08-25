@@ -1013,7 +1013,7 @@ EOF
 kubectl apply -f 21-redis.yaml
 
 echo "[*] Esperando Redis Deamonset (hasta 4min)..."
-kubectl rollout status deamonset/redis -n moodle-prod --timeout=240s
+kubectl rollout status daemonset/redis -n moodle-prod --timeout=240s
 
 # ==========================================
 # 9. MOODLE DEPLOYMENT (3 RÉPLICAS)
