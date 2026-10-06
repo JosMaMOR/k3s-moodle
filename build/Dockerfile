@@ -368,6 +368,10 @@ RUN a2ensite moodle.conf
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod 755 /entrypoint.sh
 
+# Siembra idempotente del store Redis en la MUC (lo invoca el entrypoint)
+COPY configure-cache.php /usr/local/lib/moodle-k3s/configure-cache.php
+RUN chmod 644 /usr/local/lib/moodle-k3s/configure-cache.php
+
 # ============================================================
 # Permisos finales — sin /etc/apache2/ssl
 # ============================================================

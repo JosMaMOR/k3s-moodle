@@ -128,12 +128,11 @@ ${CONFIG_BASE}
 // ── Sesiones en galera ----- ─────────────────────────────────────────────────
 \$CFG->dbsessions = true;
 
-// ── Caché en Redis (DB 1) ────────────────────────────────────────────────────
-\$CFG->cachestore_redis_server   = '${REDIS_HOST}';
-\$CFG->cachestore_redis_port     = ${REDIS_PORT};
-\$CFG->cachestore_redis_database = 1;
-\$CFG->cachestore_redis_prefix   = 'moodle_cache_';
-${REDIS_AUTH_CACHE}
+// ── Caché local por pod (fuera de NFS) ───────────────────────────────────────
+// localcachedir NO debe vivir en moodledata (Longhorn RWX): es caché local
+// de cada nodo. El application/session cache de la MUC va a Redis y lo
+// configura configure-cache.php (Moodle no lee cachestore_redis_* de aquí).
+\$CFG->localcachedir = '${MOODLE_LOCALCACHEDIR}';
 
 // ── Rendimiento ──────────────────────────────────────────────────────────────
 // NOTA: ini_set('memory_limit') en config.php solo puede BAJAR el límite
@@ -157,6 +156,29 @@ CFGEOF
     mv "${TMP_CFG}" "${DEST}"
     chmod 640 "${DEST}"
     ok "config.php generado y validado en ${DEST}"
+}
+
+# ── Función: garantizar un $CFG->setting en config.php (idempotente) ──
+# Si el setting ya existe (cualquier valor) NO se toca. Si falta, se
+# inserta justo antes del require_once de setup.php. Cubre el path 5b.
+# Uso: ensure_cfg <nombre> <valor_php_literal> <config.php>
+ensure_cfg() {
+    local NAME="$1" VALUE="$2" TARGET="$3" TMP_PATCH
+    if grep -qE "^[[:space:]]*\\\$CFG->${NAME}[[:space:]]*=" "${TARGET}"; then
+        ok "  \$CFG->${NAME} presente (no modificado)"
+        return 0
+    fi
+    TMP_PATCH=$(mktemp /tmp/moodle-config-patch-XXXXXX.php)
+    awk -v line="\$CFG->${NAME} = ${VALUE}; // añadido por entrypoint" '
+        /require_once.*lib\/setup\.php/ && !done { print line; done = 1 }
+        { print }
+        END { if (!done) print line }
+    ' "${TARGET}" > "${TMP_PATCH}"
+    php -l "${TMP_PATCH}" > /dev/null 2>&1 \
+        || { rm -f "${TMP_PATCH}"; die "Sintaxis PHP inválida al añadir \$CFG->${NAME}"; }
+    mv "${TMP_PATCH}" "${TARGET}"
+    chmod 640 "${TARGET}"
+    ok "  \$CFG->${NAME} = ${VALUE} añadido"
 }
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -201,6 +223,9 @@ log "[2/9] Configurando variables..."
 : "${REDIS_HOST:=redis}"
 : "${REDIS_PORT:=6379}"
 : "${REDIS_PASSWORD:=}"
+: "${MOODLE_LOCALCACHEDIR:=/tmp/moodle-localcache}"
+: "${MOODLE_CACHE_STORE:=redis-k3s}"
+: "${MOODLE_CACHE_PREFIX:=mdlc_}"
 
 : "${SERVER_NAME:=mcc.tesoem.edu.mx}"
 : "${MOODLE_URL:=https://${SERVER_NAME}}"
@@ -501,6 +526,12 @@ fi
 
 ok "[6/10] dirroot OK"
 
+# Settings K3s que deben existir también en instalaciones existentes (5b)
+log "[6b/10] Verificando settings K3s en config.php..."
+ensure_cfg "dbsessions"    "true"                          "${CFG_TARGET}"
+ensure_cfg "localcachedir" "'${MOODLE_LOCALCACHEDIR}'"     "${CFG_TARGET}"
+ok "[6b/10] Settings K3s OK"
+
 # ============================================================
 # 7. PERMISOS Y DIRECTORIOS DE MOODLEDATA
 # ============================================================
@@ -510,11 +541,29 @@ if [ -d /var/www/moodledata ]; then
     [ -w /var/www/moodledata ] \
         && ok "  moodledata escribible" \
         || warn "  moodledata NO escribible — revisar permisos del PVC"
-    mkdir -p /var/www/moodledata/{sessions,cache,localcache,temp,filedir}
+    mkdir -p /var/www/moodledata/{sessions,cache,temp,filedir}
 fi
 
 chmod 640 /var/www/html/public/config.php 2>/dev/null || true
 ok "[7/10] Permisos ajustados"
+
+# ============================================================
+# 7b. CACHÉ DE LA MUC EN REDIS (idempotente, 5a y 5b)
+# ============================================================
+# Crea/actualiza el store Redis y mapea application + session a él,
+# escribiendo moodledata/muc/config.php mediante la API de Moodle.
+# flock: varios pods pueden arrancar a la vez sobre el mismo RWX.
+# Un fallo aquí NO detiene el pod: Moodle cae al caché en archivos
+# (lento pero funcional) — el caché es reconstruible por diseño.
+log "[7b/10] Configurando caché MUC → Redis..."
+mkdir -p "${MOODLE_LOCALCACHEDIR}"
+if flock -w 60 /var/www/moodledata/.k3s-muc.lock \
+       php /usr/local/lib/moodle-k3s/configure-cache.php 2>&1 | sed 's/^/  [muc] /'; \
+   [ "${PIPESTATUS[0]}" -eq 0 ]; then
+    ok "[7b/10] Caché MUC en Redis"
+else
+    warn "[7b/10] No se pudo configurar la MUC — Moodle usará caché en archivos"
+fi
 
 # ============================================================
 # 8. CRON INTERNO (opcional, sin solapamiento)
