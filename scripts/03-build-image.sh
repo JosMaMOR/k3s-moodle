@@ -14,13 +14,19 @@ BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 REGISTRY_HOST="localhost"
 REGISTRY_PORT="5000"
 IMAGE_NAME="moodle-apache"
-IMAGE_TAG="${IMAGE_TAG:-5.1-k3s-raid}"
+# Tag ÚNICO por build. Con imagePullPolicy: IfNotPresent (necesario para que
+# B arranque Moodle con la imagen en caché aunque A y su registry estén caídos),
+# un tag reutilizado nunca se actualizaría en los nodos. Cada build = tag nuevo.
+IMAGE_TAG="${IMAGE_TAG:-5.1-k3s-$(date +%Y%m%d-%H%M%S)}"
 # El nombre completo incluye el registry para que Podman sepa dónde hacer push
 FULL_IMAGE="${REGISTRY_HOST}:${REGISTRY_PORT}/${IMAGE_NAME}:${IMAGE_TAG}"
 
 # Directorio del contexto de build (donde está el Dockerfile)
 BUILD_CONTEXT="${BUILD_CONTEXT:-/root/k3s-moodle/build}"
 DOCKERFILE="${DOCKERFILE:-Dockerfile}"
+
+# Archivo de estado: el 04 lee de aquí qué imagen desplegar.
+IMAGE_STATE_FILE="${IMAGE_STATE_FILE:-/root/k3s-moodle/scripts/.moodle-image}"
 
 # Opciones de build
 NO_CACHE="${NO_CACHE:-false}"
@@ -179,6 +185,27 @@ else
     log_warn "Pull de prueba falló — verifica que K3s tenga registries.yaml configurado."
     log_info "  cat /etc/rancher/k3s/registries.yaml"
     log_info "  systemctl restart k3s"
+fi
+
+# ============================================================================
+# PASO 6: REGISTRAR LA IMAGEN Y ACTUALIZAR EL CLÚSTER (si ya existe)
+# ============================================================================
+log_step "Paso 6 — Registrando imagen activa"
+
+echo "${FULL_IMAGE}" > "${IMAGE_STATE_FILE}"
+log_ok "Imagen activa guardada en ${IMAGE_STATE_FILE}"
+
+# Si Moodle ya está desplegado, rodar a la imagen nueva. En instalación
+# limpia no existe aún y el 04 la tomará del archivo de estado.
+if command -v kubectl >/dev/null 2>&1 \
+   && kubectl get deployment moodle -n moodle-prod >/dev/null 2>&1; then
+    kubectl set image deployment/moodle moodle="${FULL_IMAGE}" -n moodle-prod >/dev/null \
+        && log_ok "deployment/moodle → ${FULL_IMAGE} (rollout en curso)"
+    kubectl set image cronjob/moodle-cron cron="${FULL_IMAGE}" -n moodle-prod >/dev/null 2>&1 \
+        && log_ok "cronjob/moodle-cron → ${FULL_IMAGE}"
+    log_info "Seguimiento: kubectl rollout status deployment/moodle -n moodle-prod"
+else
+    log_info "Moodle aún no desplegado — el 04 usará ${FULL_IMAGE}"
 fi
 
 # ── Resumen final ─────────────────────────────────────────────────────────────

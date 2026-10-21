@@ -508,6 +508,31 @@ EOF
 	fi
     fi
 
+    # ── Registry de imágenes del proyecto (solo nodos de datos amd64) ──────────
+    # El registry vive en A. Sin esto, "localhost:5000/moodle-apache" no existe
+    # en B y los pods de Moodle que caen aquí quedan en ImagePullBackOff.
+    # El mirror redirige "localhost:5000" al registry de A por la LAN. Una vez
+    # jalada, la imagen queda en caché (IfNotPresent) y B arranca Moodle aunque
+    # A esté caído. Se escribe ANTES de instalar k3s: containerd la lee al arrancar.
+    if [ "${STORAGE_NODE}" = "true" ]; then
+	cat > /etc/rancher/k3s/registries.yaml << EOF
+# Generado por 05-join-nodes.sh — registry del proyecto en el nodo A
+mirrors:
+  "localhost:5000":
+    endpoint:
+      - "http://${NODE_A_IP}:5000"
+configs:
+  "${NODE_A_IP}:5000":
+    tls:
+      insecure_skip_verify: true
+EOF
+	if curl -sf --connect-timeout 5 "http://${NODE_A_IP}:5000/v2/" >/dev/null; then
+	    log_ok "Registry de A alcanzable en http://${NODE_A_IP}:5000"
+	else
+	    log_warn "No se alcanza http://${NODE_A_IP}:5000 — revisa el 02 (bind/firewall) en A."
+	fi
+    fi
+
     # Inicializa la conexion como control-pane
   curl -sfL https://get.k3s.io | \
     INSTALL_K3S_VERSION="${K3S_VERSION}" \

@@ -23,8 +23,14 @@ LONGHORN_NAMESPACE="longhorn-system"
 REGISTRY_HOST="localhost"
 REGISTRY_PORT="5000"
 IMAGE_NAME="moodle-apache"
-IMAGE_TAG="5.1-k3s-raid"
-MOODLE_IMAGE="${REGISTRY_HOST}:${REGISTRY_PORT}/${IMAGE_NAME}:${IMAGE_TAG}"
+# La imagen la decide el 03: cada build tiene tag único y lo deja aquí.
+IMAGE_STATE_FILE="/root/k3s-moodle/scripts/.moodle-image"
+if [ ! -s "${IMAGE_STATE_FILE}" ]; then
+  echo "ERROR: no existe ${IMAGE_STATE_FILE} — ejecuta primero ./03-build-image.sh"
+  exit 1
+fi
+MOODLE_IMAGE="$(cat "${IMAGE_STATE_FILE}")"
+IMAGE_TAG="${MOODLE_IMAGE##*:}"
 
 # ── Verificar registry antes de continuar ────────────────────────────────────
 echo "[*] Verificando registry local en ${REGISTRY_HOST}:${REGISTRY_PORT}..."
@@ -46,7 +52,7 @@ if ! curl -sf "http://${REGISTRY_HOST}:${REGISTRY_PORT}/v2/${IMAGE_NAME}/tags/li
   echo "  ╔══════════════════════════════════════════════════════════════╗"
   echo "  ║  ERROR: Imagen no encontrada en el registry local            ║"
   echo "  ║  Imagen esperada: ${MOODLE_IMAGE}"
-  echo "  ║  Ejecuta primero: ./05-build-image.sh                        ║"
+  echo "  ║  Ejecuta primero: ./03-build-image.sh                        ║"
   echo "  ╚══════════════════════════════════════════════════════════════╝"
   exit 1
 fi
@@ -103,7 +109,12 @@ spec:
 EOF
 
     # El ConfigMap guarda los settings como UN string; el merge reemplaza el
-    # valor completo, así que reproducimos los 2 defaults de v1.11.2 + el nuestro.
+    # valor completo, así que reproducimos los 2 defaults de v1.11.2 + los nuestros.
+    # HA de RWX (los PVC de Moodle se sirven por NFS desde UN share-manager):
+    #   rwx-volume-fast-failover → si cae el nodo del share-manager, Longhorn lo
+    #     detecta por lease y lo mueve en segundos, no en minutos (experimental).
+    #   node-down-pod-deletion-policy → borra los pods con volumen Longhorn que
+    #     quedan atorados en un nodo caído, para que se reprogramen en el vivo.
     cat > "${LH_DIR}/patch-system-managed-nodeselector.yaml" <<'EOF'
 apiVersion: v1
 kind: ConfigMap
@@ -116,6 +127,8 @@ data:
     priority-class: "longhorn-critical"
     disable-revision-counter: "{\"v1\":\"true\"}"
     system-managed-components-node-selector: "tesoem.edu.mx/longhorn-node:true"
+    rwx-volume-fast-failover: "true"
+    node-down-pod-deletion-policy: "delete-both-statefulset-and-deployment-pod"
 EOF
 
     cat > "${LH_DIR}/kustomization.yaml" <<'EOF'
@@ -793,12 +806,29 @@ spec:
   selector:
     matchLabels:
       app: maxscale
+  # 2 réplicas con anti-affinity REQUIRED en 2 nodos amd64: no cabe un 3er
+  # pod de surge. Con el default (maxSurge 1 / maxUnavailable 0) cualquier
+  # rollout se atora. Se sustituye un pod a la vez sin surge.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   template:
     metadata:
       labels:
         app: maxscale
         tier: data-access
     spec:
+      tolerations:
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -911,11 +941,19 @@ echo "[*] ✓ MaxScale operativo — mariadb-1 en Down es lo ESPERADO hasta el 0
 # "NOAUTH Authentication required" (exit code 1) y la probe falla
 # aunque Redis esté perfectamente saludable.
 # Solución: sh -c con variable de entorno expandida en tiempo de ejecución.
+#
+# HA: UN solo Redis compartido (Deployment), NO un DaemonSet por nodo.
+# El application cache de la MUC debe ser común a todos los pods de Moodle:
+# con un Redis por nodo (internalTrafficPolicy: Local) cada nodo tenía su
+# propia caché y las invalidaciones de un nodo no llegaban al otro.
+# Sin persistencia: es caché reconstruible. Si su nodo cae, se reprograma
+# en ~30s (tolerationSeconds) y Moodle reconstruye la caché en frío; las
+# sesiones no se pierden porque viven en Galera.
 echo "[*] Desplegando Redis..."
 
 cat > 21-redis.yaml << 'EOF'
 apiVersion: apps/v1
-kind: DaemonSet
+kind: Deployment
 metadata:
   name: redis
   namespace: moodle-prod
@@ -923,6 +961,9 @@ metadata:
     app: redis
     tier: cache
 spec:
+  replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: redis
@@ -941,7 +982,9 @@ spec:
         command:
         - redis-server
         - --appendonly
-        - "yes"
+        - "no"
+        - --save
+        - ""
         - --requirepass
         - $(REDIS_PASSWORD)
         - --maxmemory
@@ -988,8 +1031,23 @@ spec:
       volumes:
       - name: redis-data
         emptyDir: {}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/arch
+                operator: In
+                values: ["amd64"]
       tolerations:
-      - operator: Exists
+      - key: node.kubernetes.io/unreachable
+        operator: Exists
+        effect: NoExecute
+        tolerationSeconds: 30
+      - key: node.kubernetes.io/not-ready
+        operator: Exists
+        effect: NoExecute
+        tolerationSeconds: 30
 ---
 apiVersion: v1
 kind: Service
@@ -1000,7 +1058,6 @@ metadata:
     app: redis
 spec:
   type: ClusterIP
-  internalTrafficPolicy: Local
   ports:
   - port: 6379
     targetPort: 6379
@@ -1010,10 +1067,11 @@ spec:
     app: redis
 EOF
 
+kubectl delete daemonset redis -n moodle-prod --ignore-not-found
 kubectl apply -f 21-redis.yaml
 
-echo "[*] Esperando Redis Deamonset (hasta 4min)..."
-kubectl rollout status daemonset/redis -n moodle-prod --timeout=240s
+echo "[*] Esperando Redis (hasta 4min)..."
+kubectl rollout status deployment/redis -n moodle-prod --timeout=240s
 
 # ==========================================
 # 9. MOODLE DEPLOYMENT (3 RÉPLICAS)
@@ -1048,8 +1106,19 @@ spec:
         app: moodle
         tier: frontend
     spec:
-      nodeSelector:
-        kubernetes.io/hostname: k3s-moodle-master
+      # Sin pin a A: los pods deben poder vivir en B. La imagen llega a B por
+      # su registries.yaml (05) y queda en caché (IfNotPresent).
+      # tolerationSeconds: si un nodo cae, sus pods se reprograman en 30s
+      # (default: 300s).
+      tolerations:
+      - key: node.kubernetes.io/unreachable
+        operator: Exists
+        effect: NoExecute
+        tolerationSeconds: 30
+      - key: node.kubernetes.io/not-ready
+        operator: Exists
+        effect: NoExecute
+        tolerationSeconds: 30
       securityContext:
         fsGroup: 1001
       initContainers:
@@ -1075,11 +1144,11 @@ spec:
             cpu: "50m"
       containers:
       - name: moodle
-        image: localhost:5000/moodle-apache:5.1-k3s-raid
-        # FIX v4: Always → K3s hace pull desde registry local en cada pod.
-        # Con IfNotPresent buscaba en cache local de containerd (vacío),
-        # fallaba, e intentaba Docker Hub donde la imagen no existe.
-        imagePullPolicy: Always
+        image: __MOODLE_IMAGE__
+        # HA: IfNotPresent + tag único por build (03). Con Always, un pod que
+        # se reinicia en B mientras A está caído intentaba jalar del registry
+        # (que vive en A) y fallaba aunque la imagen ya estuviera en caché.
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8080
           name: http
@@ -1138,6 +1207,14 @@ spec:
           claimName: moodle-data-pvc
 
       affinity:
+        # Solo amd64: la imagen no existe para la Pi (aarch64).
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/arch
+                operator: In
+                values: ["amd64"]
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
           - weight: 100
@@ -1170,6 +1247,7 @@ spec:
     app: moodle
 EOF
 
+sed -i "s|__MOODLE_IMAGE__|${MOODLE_IMAGE}|g" 30-moodle.yaml
 kubectl apply -f 30-moodle.yaml
 
 # ==========================================
@@ -1209,8 +1287,15 @@ spec:
       template:
         spec:
           restartPolicy: OnFailure
-          nodeSelector:
-            kubernetes.io/hostname: k3s-moodle-master
+          # Sin pin a A (el cron debe seguir corriendo si A cae); solo amd64.
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                - matchExpressions:
+                  - key: kubernetes.io/arch
+                    operator: In
+                    values: ["amd64"]
           initContainers:
           - name: wait-for-db
             image: busybox:1.36
@@ -1220,9 +1305,8 @@ spec:
             - "until nc -z mariadb 3306 && nc -z redis 6379; do sleep 5; done"
           containers:
           - name: cron
-            image: localhost:5000/moodle-apache:5.1-k3s-raid
-            # FIX v4: Always → pull desde registry local, no desde Docker Hub
-            imagePullPolicy: Always
+            image: __MOODLE_IMAGE__
+            imagePullPolicy: IfNotPresent
             command:
             - /bin/bash
             - -c
@@ -1259,6 +1343,7 @@ spec:
               claimName: moodle-data-pvc
 EOF
 
+sed -i "s|__MOODLE_IMAGE__|${MOODLE_IMAGE}|g" 31-cronjob.yaml
 kubectl apply -f 31-cronjob.yaml
 
 # ==========================================
@@ -1328,7 +1413,10 @@ metadata:
   name: moodle-pdb
   namespace: moodle-prod
 spec:
-  minAvailable: 2
+  # maxUnavailable (no minAvailable: 2): con 2 réplicas, minAvailable 2 no
+  # permite NINGUNA disrupción y un `kubectl drain` del nodo A se atora para
+  # siempre. Así se drena de uno en uno y siempre queda un pod sirviendo.
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: moodle

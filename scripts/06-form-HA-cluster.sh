@@ -246,10 +246,20 @@ verify_storage_baseline() {
     || die "Se esperaban 2 nodos Longhorn (A y B), hay ${lh_nodes}. ¿La Pi se coló o falta B?"
   log_ok "${lh_nodes} nodos Longhorn registrados (esperado: A y B)."
 
-  mgr_pods=$(kubectl -n longhorn-system get pods -l app=longhorn-manager --no-headers 2>/dev/null \
-    | awk '$2=="2/2" && $3=="Running"{c++} END{print c+0}')
-  [ "${mgr_pods}" -eq 2 ] \
-    || die "Se esperaban 2 longhorn-manager sanos (2/2 Running), hay ${mgr_pods}."
+  # Justo después del join de B su manager puede seguir arrancando:
+  # esperar hasta 300s en vez de abortar con una sola lectura.
+  local waited=0 timeout=300 interval=10
+  while true; do
+    mgr_pods=$(kubectl -n longhorn-system get pods -l app=longhorn-manager --no-headers 2>/dev/null \
+      | awk '$2=="2/2" && $3=="Running"{c++} END{print c+0}')
+    [ "${mgr_pods}" -eq 2 ] && break
+    if [ "${waited}" -ge "${timeout}" ]; then
+      kubectl -n longhorn-system get pods -l app=longhorn-manager -o wide >&2
+      die "Se esperaban 2 longhorn-manager sanos (2/2 Running) tras ${timeout}s, hay ${mgr_pods}."
+    fi
+    log_info "longhorn-manager sanos: ${mgr_pods}/2 — esperando (${waited}/${timeout}s)..."
+    sleep "${interval}"; waited=$((waited + interval))
+  done
   log_ok "${mgr_pods} longhorn-manager sanos."
 }
 
@@ -294,6 +304,23 @@ ensure_longhorn_ha() {
   log_ok "Almacenamiento en HA: todos los volúmenes con réplica en A y B."
 }
 
+# ── 2b. Settings de Longhorn para failover de nodo ────────────────────────────
+# El 04 ya los declara en longhorn-default-setting; aquí se FUERZAN sobre los
+# objetos Setting vivos (idempotente) para que también apliquen en clústeres
+# instalados antes de este cambio.
+ensure_longhorn_failover_settings() {
+  log_sub "Aplicando settings de failover de Longhorn"
+  local name value
+  for pair in "rwx-volume-fast-failover=true" \
+              "node-down-pod-deletion-policy=delete-both-statefulset-and-deployment-pod"; do
+    name="${pair%%=*}"; value="${pair#*=}"
+    kubectl -n longhorn-system patch settings.longhorn.io "${name}" \
+      --type=merge -p "{\"value\":\"${value}\"}" >/dev/null \
+      || die "No se pudo fijar el setting ${name}=${value}."
+    log_ok "${name} = ${value}"
+  done
+}
+
 # ── 3. Escalar Moodle a HA (HPA + réplicas) ───────────────────────────────────
 # El orden importa: esto va DESPUÉS de ensure_longhorn_ha, porque los 3 pods de
 # Moodle cuelgan del volumen RWX, que debe estar servido en HA antes de escalar.
@@ -323,6 +350,95 @@ scale_moodle() {
     || die "Se esperaban ${MOODLE_TARGET_REPLICAS} pods Running, hay ${running}."
   log_ok "${running} pods de Moodle Running. Distribución:"
   kubectl -n "${MOODLE_NS}" get pods -l app=moodle -o wide --no-headers | awk '{print "      "$1" → "$7}'
+
+  # HA real = pods en A Y en B. La anti-affinity es preferred: si los pods
+  # nacieron antes de que B existiera, pueden seguir todos en A. Un rollout
+  # restart los vuelve a programar ya con B disponible.
+  local nodes
+  nodes=$(kubectl -n "${MOODLE_NS}" get pods -l app=moodle -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' \
+    | sort -u | grep -c .)
+  if [ "${nodes}" -lt 2 ]; then
+    log_warn "Todos los pods de Moodle están en un solo nodo — redistribuyendo..."
+    kubectl rollout restart deployment/"${MOODLE_DEPLOY}" -n "${MOODLE_NS}" >/dev/null
+    kubectl rollout status deployment/"${MOODLE_DEPLOY}" -n "${MOODLE_NS}" --timeout=600s \
+      || die "El rollout de redistribución no completó."
+    nodes=$(kubectl -n "${MOODLE_NS}" get pods -l app=moodle -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' \
+      | sort -u | grep -c .)
+    [ "${nodes}" -ge 2 ] \
+      || die "Moodle sigue en un solo nodo. ¿B puede jalar la imagen? kubectl -n ${MOODLE_NS} describe pod -l app=moodle"
+    kubectl -n "${MOODLE_NS}" get pods -l app=moodle -o wide --no-headers | awk '{print "      "$1" → "$7}'
+  fi
+  log_ok "Moodle repartido en ${nodes} nodos."
+}
+
+# ── 4. Traefik (ingress) en HA: una réplica en A y otra en B ──────────────────
+# k3s instala Traefik con 1 réplica: si cae su nodo, todo el tráfico web muere
+# aunque Moodle siga vivo en el otro. HelmChartConfig es el mecanismo de k3s
+# para sobreescribir values del chart empaquetado.
+# Anti-affinity REQUIRED en 2 nodos amd64 → no cabe un pod de surge; por eso
+# maxSurge 0 / maxUnavailable 1 (si no, los rollouts se atoran).
+configure_traefik_ha() {
+  log_sub "Configurando Traefik en HA (2 réplicas, A y B)"
+  local cfg="${MANIFEST_DIR}/traefik-ha-config.yaml"
+  mkdir -p "${MANIFEST_DIR}"
+  cat > "${cfg}" << 'EOF'
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    deployment:
+      replicas: 2
+    updateStrategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 0
+        maxUnavailable: 1
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+          - matchExpressions:
+            - key: kubernetes.io/arch
+              operator: In
+              values: ["amd64"]
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+          topologyKey: kubernetes.io/hostname
+    tolerations:
+    - key: CriticalAddonsOnly
+      operator: Exists
+    - key: node.kubernetes.io/unreachable
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 30
+    - key: node.kubernetes.io/not-ready
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 30
+EOF
+  kubectl apply -f "${cfg}" || die "No se pudo aplicar el HelmChartConfig de Traefik."
+
+  # El helm-controller de k3s re-instala el chart de forma asíncrona:
+  # esperar a que el Deployment refleje replicas=2 y luego el rollout.
+  local waited=0 timeout=300 replicas
+  while true; do
+    replicas=$(kubectl -n kube-system get deploy traefik -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)
+    [ "${replicas}" = "2" ] && break
+    [ "${waited}" -ge "${timeout}" ] && die "Traefik no pasó a 2 réplicas en ${timeout}s. Revisa: kubectl -n kube-system logs -l job-name --tail=30"
+    log_info "Esperando que el helm-controller aplique los values (${waited}/${timeout}s)..."
+    sleep 10; waited=$((waited + 10))
+  done
+  kubectl -n kube-system rollout status deploy/traefik --timeout=300s \
+    || die "El rollout de Traefik no completó."
+  log_ok "Traefik en HA. Distribución:"
+  kubectl -n kube-system get pods -l app.kubernetes.io/name=traefik -o wide --no-headers \
+    | awk '{print "      "$1" → "$7}'
 }
 
 # ── Resumen final de HA: dónde quedó cada réplica y cada pod ───────────────────
@@ -370,8 +486,10 @@ generate_rbac
 deploy_kube_vip
 verify_kube_vip
 verify_storage_baseline
+ensure_longhorn_failover_settings
 ensure_longhorn_ha
 scale_moodle
+configure_traefik_ha
 show_ha_summary
 
 echo ""

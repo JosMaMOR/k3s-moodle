@@ -20,6 +20,11 @@ REGISTRY_SERVICE_NAME="podman-registry"
 K3S_REGISTRIES_FILE="/etc/rancher/k3s/registries.yaml"
 NODE_IP=$(hostname -I | awk '{print $1}')
 
+# cluster.env: se necesita NODE_B_IP para abrir el registry SOLO a B.
+CLUSTER_ENV="$(dirname "$(readlink -f "$0")")/cluster.env"
+# shellcheck source=/dev/null
+[ -f "${CLUSTER_ENV}" ] && source "${CLUSTER_ENV}"
+
 log_step() { echo -e "\n${BLUE}${BOLD}══════════════════════════════════════════════${NC}";
              echo -e "${BLUE}${BOLD}  $1${NC}";
              echo -e "${BLUE}${BOLD}══════════════════════════════════════════════${NC}"; }
@@ -95,13 +100,15 @@ log_step "Paso 4 — Iniciando el registry local"
 
 # Parámetros del contenedor:
 #   --name          → nombre para identificarlo y controlarlo
-#   -p 5000:5000    → exponer puerto en localhost (bind solo a loopback para seguridad)
+#   -p 5000:5000    → todas las interfaces: B descarga la imagen de Moodle
+#                     desde aquí (http://NODE_A_IP:5000). El acceso desde la
+#                     LAN se restringe con firewalld a la IP de B (Paso 4b).
 #   -v              → montar directorio de datos persistente
 #   -e REGISTRY_*   → configuración del registry v2
 #   --restart=always → reiniciar automáticamente si falla
 podman run -d \
     --name "${REGISTRY_CONTAINER_NAME}" \
-    -p 127.0.0.1:5000:5000 \
+    -p 5000:5000 \
     -v "${REGISTRY_DATA_DIR}:/var/lib/registry:Z" \
     -e REGISTRY_STORAGE_DELETE_ENABLED=true \
     -e REGISTRY_LOG_LEVEL=warn \
@@ -121,6 +128,25 @@ until curl -sf "http://${REGISTRY_HOST}:${REGISTRY_PORT}/v2/" > /dev/null 2>&1; 
 done
 echo ""
 log_ok "Registry respondiendo en http://${REGISTRY_HOST}:${REGISTRY_PORT}/v2/"
+
+# ============================================================================
+# PASO 4b: ABRIR EL REGISTRY SOLO AL NODO B
+# ============================================================================
+# B necesita jalar la imagen de Moodle (registries.yaml de B → NODE_A_IP:5000).
+# Regla rica: solo la IP de B llega al 5000; el resto de la LAN no.
+if systemctl is-active --quiet firewalld; then
+    if [ -n "${NODE_B_IP:-}" ]; then
+        RULE="rule family=ipv4 source address=${NODE_B_IP}/32 port port=${REGISTRY_PORT} protocol=tcp accept"
+        firewall-cmd --permanent --query-rich-rule="${RULE}" >/dev/null 2>&1 \
+            || firewall-cmd --permanent --add-rich-rule="${RULE}" >/dev/null
+        firewall-cmd --reload >/dev/null
+        log_ok "firewalld: ${REGISTRY_PORT}/tcp abierto solo para B (${NODE_B_IP})."
+    else
+        log_warn "NODE_B_IP no definida (¿falta cluster.env?) — B no podrá jalar imágenes."
+    fi
+else
+    log_info "firewalld inactivo — no se requiere regla para el registry."
+fi
 
 # ============================================================================
 # PASO 5: CREAR SERVICIO SYSTEMD PARA ARRANQUE AUTOMÁTICO
@@ -157,7 +183,7 @@ ExecStartPre=/bin/bash -c '\
     podman ps -a --format "{{.Names}}" | grep -q "^${REGISTRY_CONTAINER_NAME}$" || \
     podman run -d \
         --name ${REGISTRY_CONTAINER_NAME} \
-        -p 127.0.0.1:5000:5000 \
+        -p 5000:5000 \
         -v ${REGISTRY_DATA_DIR}:/var/lib/registry:Z \
         -e REGISTRY_STORAGE_DELETE_ENABLED=true \
         -e REGISTRY_LOG_LEVEL=warn \
