@@ -151,6 +151,76 @@ EOF
   log_ok "RBAC aplicado en el clúster"
 }
 
+# ── Pi = árbitro puro: label + taint (idempotente) ────────────────────────────
+# El 05 ya los pone al registrar la Pi; aquí se reafirman para clústeres que
+# existían antes del cambio. El taint es NoSchedule: NO desaloja lo que ya está
+# en la Pi, por eso después se reprograman explícitamente los addons de k3s.
+ARBITER_KEY="tesoem.edu.mx/arbiter"
+
+mark_pi_arbiter() {
+  log_sub "Declarando la Pi (${NODE_PI}) como árbitro puro"
+  : "${NODE_PI:?NODE_PI no está definida en cluster.env}"
+
+  kubectl label node "${NODE_PI}" "${ARBITER_KEY}=true" --overwrite >/dev/null \
+    || die "No se pudo etiquetar ${NODE_PI}."
+  kubectl taint node "${NODE_PI}" "${ARBITER_KEY}=true:NoSchedule" --overwrite >/dev/null \
+    || die "No se pudo aplicar el taint a ${NODE_PI}."
+  log_ok "${NODE_PI}: label y taint ${ARBITER_KEY}=true:NoSchedule"
+
+  # garbd ya desplegado (re-ejecución del 06 sobre un clúster existente):
+  # darle la toleration antes de que algo lo recree y no pueda volver a la Pi.
+  if kubectl -n moodle-prod get deployment garbd >/dev/null 2>&1; then
+    kubectl -n moodle-prod patch deployment garbd --type=merge -p \
+      "{\"spec\":{\"template\":{\"spec\":{\"tolerations\":[{\"key\":\"${ARBITER_KEY}\",\"operator\":\"Equal\",\"value\":\"true\",\"effect\":\"NoSchedule\"}]}}}}" \
+      >/dev/null || die "No se pudo añadir la toleration a garbd."
+    kubectl -n moodle-prod rollout status deployment/garbd --timeout=180s \
+      || die "garbd no volvió tras añadir la toleration."
+    log_ok "garbd tolera el taint de árbitro."
+  fi
+
+  # Addons de k3s que pudieron quedar en la Pi: se reprograman fuera.
+  local dep
+  for dep in coredns metrics-server local-path-provisioner; do
+    # custom-columns y no -o wide: la columna RESTARTS ("3 (9m ago)") desplaza
+    # los campos y $7 deja de ser el nodo.
+    if kubectl -n kube-system get pods --no-headers \
+         -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName 2>/dev/null \
+         | awk -v d="${dep}-" -v n="${NODE_PI}" 'index($1,d)==1 && $2==n{f=1} END{exit !f}'; then
+      log_info "${dep} tiene pods en la Pi — reprogramando fuera..."
+      kubectl -n kube-system rollout restart deployment/"${dep}" >/dev/null
+      kubectl -n kube-system rollout status deployment/"${dep}" --timeout=180s \
+        || die "El rollout de ${dep} no completó."
+    fi
+  done
+  log_ok "Ningún addon de k3s queda programado en la Pi."
+}
+
+# ── CoreDNS en HA: 2 réplicas, una en A y otra en B ───────────────────────────
+# k3s trae CoreDNS con 1 réplica y toleration de 300s: si cae su nodo, el DNS
+# del clúster muere ~5 min y Moodle no resuelve maxscale/redis. Con 2 réplicas
+# repartidas, la superviviente sigue resolviendo. El manifiesto de k3s no fija
+# 'replicas', así que el scale no se revierte; su topologySpreadConstraints
+# (hostname, DoNotSchedule) ya las reparte, y el taint las deja fuera de la Pi.
+ensure_coredns_ha() {
+  log_sub "Configurando CoreDNS en HA (2 réplicas)"
+  kubectl -n kube-system scale deployment coredns --replicas=2 >/dev/null \
+    || die "No se pudo escalar CoreDNS."
+  kubectl -n kube-system rollout status deployment/coredns --timeout=180s \
+    || die "El rollout de CoreDNS no completó."
+
+  local nodes on_pi
+  nodes=$(kubectl -n kube-system get pods -l k8s-app=kube-dns \
+    -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u | grep -c .)
+  on_pi=$(kubectl -n kube-system get pods -l k8s-app=kube-dns \
+    -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | grep -c "^${NODE_PI}$" || true)
+  [ "${on_pi}" -eq 0 ] || die "CoreDNS sigue en la Pi — revisa el taint: kubectl describe node ${NODE_PI}"
+  [ "${nodes}" -ge 2 ] || die "CoreDNS no quedó repartido en 2 nodos (hay ${nodes})."
+  log_ok "CoreDNS: 2 réplicas en ${nodes} nodos, ninguna en la Pi."
+  kubectl -n kube-system get pods -l k8s-app=kube-dns --no-headers \
+    -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName \
+    | awk '{print "      "$1" → "$2}'
+}
+
 # ── Desplegar kube-vip como DaemonSet (modo ARP) ──────────────────────────────
 deploy_kube_vip() {
   log_sub "Desplegando kube-vip (DaemonSet, modo ARP, VIP ${CLUSTER_VIP})"
@@ -189,6 +259,21 @@ deploy_kube_vip() {
     log_ok "vip_interface correcto (sin 'autodetect' literal)"
   fi
 
+  # --- La VIP nunca vive en la Pi ---
+  # --taint pone tolerations 'Exists' (kube-vip tolera CUALQUIER taint), así que
+  # seguiría en la Pi pese al taint de árbitro. Pero svclb (puertos 80/443) NO lo
+  # tolera: la Pi podría ganar la VIP sin nadie escuchando en 443 y el sitio
+  # caería con todos los nodos sanos. Se reemplaza la afinidad del generador
+  # (master OR control-plane) por la misma, excluyendo al árbitro en ambos
+  # términos. kubectl patch --local edita el archivo sin tocar el clúster.
+  local affinity_patch tmp_ds
+  affinity_patch='[{"op":"replace","path":"/spec/template/spec/affinity","value":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"node-role.kubernetes.io/master","operator":"Exists"},{"key":"'"${ARBITER_KEY}"'","operator":"DoesNotExist"}]},{"matchExpressions":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists"},{"key":"'"${ARBITER_KEY}"'","operator":"DoesNotExist"}]}]}}}}]'
+  tmp_ds=$(mktemp)
+  kubectl patch --local -f "${ds_file}" --type=json -p "${affinity_patch}" -o yaml > "${tmp_ds}" \
+    || { rm -f "${tmp_ds}"; die "No se pudo excluir al árbitro de la afinidad de kube-vip."; }
+  mv "${tmp_ds}" "${ds_file}"
+  log_ok "kube-vip excluye a ${ARBITER_KEY}: la VIP solo puede vivir en A o B"
+
   kubectl apply -f "${ds_file}" || die "Falló al aplicar el DaemonSet de kube-vip."
   log_ok "DaemonSet de kube-vip aplicado"
 }
@@ -196,12 +281,13 @@ deploy_kube_vip() {
 # ── Verificar kube-vip operativo (bucle de reintento con timeout) ─────────────
 # "Running" no es "funcionando". Validamos 3 cosas end-to-end y reintentamos,
 # porque tras el apply hay una carrera entre el rollout del DaemonSet y la VIP:
-#   (1) pods 1/1 Running (los 3 control-plane)
+#   (1) pods 1/1 Running (los 2 control-plane de datos: A y B; la Pi, árbitro,
+#       queda excluida por afinidad)
 #   (2) líder electo (holderIdentity no vacío)
 #   (3) API server responde por la VIP (401/200 = sano; 000/503 = no)
 verify_kube_vip() {
   log_sub "Verificando que kube-vip esté operativo"
-  local expected=3 timeout=1200 interval=5 elapsed=0
+  local expected=2 timeout=1200 interval=5 elapsed=0
   local ds_ready lease_holder http_code
 
   while true; do
@@ -483,8 +569,10 @@ require_root
 show_banner
 verify_etcd_members
 generate_rbac
+mark_pi_arbiter
 deploy_kube_vip
 verify_kube_vip
+ensure_coredns_ha
 verify_storage_baseline
 ensure_longhorn_failover_settings
 ensure_longhorn_ha

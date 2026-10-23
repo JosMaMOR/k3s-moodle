@@ -474,6 +474,22 @@ tls-san:
   - "${MOODLE_DOMAIN}"
 EOF
 
+    # ── La Pi es ÁRBITRO PURO, declarado al scheduler ──────────────────────────
+    # label → permite excluirla por afinidad (kube-vip la usa en el 06).
+    # taint → nada se programa aquí salvo lo que lo tolere explícitamente
+    #         (garbd). Sin esto, CoreDNS/metrics-server podían caer en la Pi y
+    #         su caída tumbaba el sitio. k3s aplica node-label/node-taint solo
+    #         al REGISTRAR el nodo; el 06 los reafirma de forma idempotente.
+    if [ "${ARCH}" = "aarch64" ]; then
+	cat >> /etc/rancher/k3s/config.yaml << 'EOF'
+node-label:
+  - "tesoem.edu.mx/arbiter=true"
+node-taint:
+  - "tesoem.edu.mx/arbiter=true:NoSchedule"
+EOF
+	log_ok "Pi declarada como árbitro (label + taint tesoem.edu.mx/arbiter)."
+    fi
+
     if [ "${ARCH}" = "aarch64" ]; then
 	# En Raspberry Pi (incluido AlmaLinux para Pi), el arranque usa cmdline.txt,
 	# no GRUB. Hay que habilitar el cgroup de memoria que K3s requiere.
