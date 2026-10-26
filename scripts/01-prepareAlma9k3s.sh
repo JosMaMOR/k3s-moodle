@@ -577,6 +577,34 @@ EOF
 
   log_ok "config.yaml generado."
 
+  # ── Liberar la VIP de kube-vip cuando k3s se detiene o truena ──────────────
+  # kube-vip (modo ARP) añade la VIP como IP secundaria de la interfaz. Si k3s
+  # muere de golpe (k3s-killall.sh, OOM, crash), kube-vip no alcanza a quitarla:
+  # la VIP queda huérfana en este host, que sigue respondiendo ARP por ella
+  # mientras el nuevo líder también la anuncia → conflicto de IP y el tráfico
+  # llega a un nodo sin k3s. ExecStopPost corre en cualquier parada del
+  # servicio (stop, killall, crash antes del Restart=) y la retira.
+  # La lógica vive en un script: systemd interpreta '$' en las líneas Exec*.
+  cat > /usr/local/sbin/k3s-vip-release << EOF
+#!/bin/sh
+# Generado por 01-prepareAlma9k3s.sh — quita la VIP ${CLUSTER_VIP} de cualquier interfaz
+VIP="${CLUSTER_VIP}/32"
+ip -o -4 addr show | awk -v vip="\${VIP}" '\$4==vip{print \$2}' | while read -r dev; do
+  ip addr del "\${VIP}" dev "\${dev}" \\
+      && logger -t k3s-vip-release "VIP \${VIP} liberada de \${dev}"
+done
+exit 0
+EOF
+  chmod 755 /usr/local/sbin/k3s-vip-release
+  mkdir -p /etc/systemd/system/k3s.service.d
+  cat > /etc/systemd/system/k3s.service.d/10-vip-release.conf << 'EOF'
+[Service]
+# Ver /usr/local/sbin/k3s-vip-release. El '-' ignora el código de salida.
+ExecStopPost=-/usr/local/sbin/k3s-vip-release
+EOF
+  systemctl daemon-reload
+  log_ok "Liberación de VIP al detener k3s instalada (k3s-vip-release)."
+
   # K3s leerá el config.yaml automáticamente. Ya no se pasan flags por EXEC.
   log_sub "Instalando K3s ${K3S_VERSION}..."
   INSTALL_K3S_VERSION="${K3S_VERSION}" \
