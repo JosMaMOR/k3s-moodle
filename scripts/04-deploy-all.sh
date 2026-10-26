@@ -1171,14 +1171,16 @@ spec:
           limits:
             memory: "1Gi"
             cpu: "1000m"
+        # liveness = "¿Apache está vivo?", NO "¿Moodle puede servir?".
+        # No debe depender de la BD ni de Redis: si cae una dependencia,
+        # reiniciar el pod no la arregla y solo alarga la caída (el
+        # entrypoint tarda minutos sobre RWX). Eso lo cubre readiness:
+        # saca al pod del Service sin reiniciarlo.
         livenessProbe:
-          httpGet:
-            path: /login/index.php
+          tcpSocket:
             port: 8080
-            scheme: HTTP
-          initialDelaySeconds: 60
-          periodSeconds: 30
-          timeoutSeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
           failureThreshold: 3
         readinessProbe:
           httpGet:

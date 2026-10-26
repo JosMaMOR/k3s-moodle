@@ -237,6 +237,7 @@ main() {
   log_step "Galera de 2 nodos operativo"
   log_info "Siguiente: garbd (árbitro) en la Pi para el voto impar."
   deploy_garbd
+  scale_maxscale
 }
 
 main "$@"
